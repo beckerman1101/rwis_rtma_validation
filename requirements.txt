@@ -1,0 +1,7 @@
+pandas
+numpy
+xarray
+cfgrib
+eccodes           # runtime lib for cfgrib
+requests
+scipy
