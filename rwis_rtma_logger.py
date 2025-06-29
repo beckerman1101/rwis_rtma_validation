@@ -168,7 +168,7 @@ def pair_and_merge(rwis_pts: pd.DataFrame, cotrip: pd.DataFrame) -> pd.DataFrame
 
 def build_snapshot(api_key: str) -> xr.Dataset:
     """Full pipeline: RWIS meta → RTMA interp → CoTrip merge → xarray.Dataset."""
-    rwis_meta = pd.read_csv('rwis_metadata.csv')
+    rwis_meta = pd.read_csv(RWIS_META_CSV)
 
     grib = download_rtma_grib()
     rtma_df = interpolate_rtma_to_points(grib, rwis_meta)
@@ -176,7 +176,9 @@ def build_snapshot(api_key: str) -> xr.Dataset:
     cotrip_df = fetch_cotrip(api_key)
     merged_df = pair_and_merge(rtma_df, cotrip_df)
 
-    merged_df["time"] = pd.Timestamp.now(tz="UTC")
+    # Use timezone-naive UTC time
+    merged_df["time"] = pd.Timestamp.utcnow()
+
     ds = xr.Dataset.from_dataframe(merged_df.set_index("time"))
     return ds
 
