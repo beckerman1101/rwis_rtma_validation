@@ -5,6 +5,9 @@ on:
     - cron: '3,33 * * * *'  # Twice hourly at :03 and :33 UTC
   workflow_dispatch:        # Manual trigger
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
