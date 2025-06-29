@@ -195,10 +195,7 @@ def build_snapshot(api_key: str) -> xr.Dataset:
 
 def append_daily(ds: xr.Dataset) -> None:
     """Append snapshot to daily NetCDF; create new file if absent."""
-    if "time" not in ds.dims and "time" not in ds.coords:
-        raise ValueError("Dataset has no 'time' dimension or coordinate.")
-
-    # Strip timezone if present
+    # Ensure 'time' is timezone-naive
     if "time" in ds.indexes and hasattr(ds.indexes["time"], "tz"):
         ds = ds.assign_coords(time=ds.indexes["time"].tz_localize(None))
 
@@ -206,9 +203,17 @@ def append_daily(ds: xr.Dataset) -> None:
 
     if os.path.exists(fname):
         with xr.open_dataset(fname) as existing:
-            ds = xr.concat([existing, ds], dim="time")
+            # Align coordinates: drop or demote any extras
+            for coord in set(ds.coords) - set(existing.coords):
+                ds = ds.reset_coords(coord)
 
+            for coord in set(existing.coords) - set(ds.coords):
+                existing = existing.reset_coords(coord)
+
+            ds = xr.concat([existing, ds], dim="time")
+    
     ds.to_netcdf(fname, mode="w")
+
 
 
 def main() -> None:
