@@ -179,23 +179,29 @@ def build_snapshot(api_key: str) -> xr.Dataset:
     if merged_df.empty:
         raise ValueError("Merged dataframe is empty — no data to log.")
 
-    # Use timezone-naive UTC time
-    merged_df["time"] = pd.Timestamp.utcnow()
+    # Add UTC timestamp (timezone-naive)
+    now = pd.Timestamp.utcnow()
+    merged_df["time"] = now
+
+    # Clean up problematic columns
     merged_df = merged_df.drop(columns=["properties.lastUpdated"], errors="ignore")
+
+    # Set time and station_id as multi-index
     merged_df = merged_df.set_index(["time", "rwis_station_id"])
 
-# Convert to dataset
+    # Convert to xarray Dataset
     ds = xr.Dataset.from_dataframe(merged_df)
 
-# Promote 'rwis_lat', 'rwis_lon', 'rwis_station_name' to coordinates
+    # Promote static station metadata to coordinates
     ds = ds.set_coords(["rwis_lat", "rwis_lon", "rwis_station_name"])
 
     return ds
 
 
+
 def append_daily(ds: xr.Dataset) -> None:
     """Append snapshot to daily NetCDF; create new file if absent."""
-    # Ensure 'time' is timezone-naive
+    # Ensure time is timezone-naive
     if "time" in ds.indexes and hasattr(ds.indexes["time"], "tz"):
         ds = ds.assign_coords(time=ds.indexes["time"].tz_localize(None))
 
@@ -203,15 +209,8 @@ def append_daily(ds: xr.Dataset) -> None:
 
     if os.path.exists(fname):
         with xr.open_dataset(fname) as existing:
-            # Align coordinates: drop or demote any extras
-            for coord in set(ds.coords) - set(existing.coords):
-                ds = ds.reset_coords(coord)
-
-            for coord in set(existing.coords) - set(ds.coords):
-                existing = existing.reset_coords(coord)
-
             ds = xr.concat([existing, ds], dim="time")
-    
+
     ds.to_netcdf(fname, mode="w")
 
 
