@@ -181,6 +181,8 @@ def build_snapshot(api_key: str) -> xr.Dataset:
 
     # Use timezone-naive UTC time
     merged_df["time"] = pd.Timestamp.utcnow()
+    merged_df = merged_df.drop(columns=["properties.lastUpdated"], errors="ignore")
+
 
     # Ensure time is index
     ds = xr.Dataset.from_dataframe(merged_df.set_index("time"))
