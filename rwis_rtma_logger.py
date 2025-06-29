@@ -181,16 +181,19 @@ def build_snapshot(api_key: str) -> xr.Dataset:
 
     # Add UTC timestamp (timezone-naive)
     now = pd.Timestamp.utcnow()
-    merged_df["time"] = pd.Timestamp.utcnow()
+    merged_df["time"] = now
 
-# Create Dataset using time as a dimension, and promote station_id manually
+# Set multi-index (time and station ID)
+    merged_df = merged_df.set_index(["time", "rwis_station_id"])
+
+# Convert to Dataset
     ds = xr.Dataset.from_dataframe(merged_df)
 
-# Move time and station ID into dimensions
-    ds = ds.expand_dims("time")  # makes time a dimension with 1 step
+# Move index levels to dimensions
+    ds = ds.reset_coords(["time", "rwis_station_id"])
 
-# Promote metadata coordinates
-    ds = ds.set_coords(["rwis_station_id", "rwis_lat", "rwis_lon", "rwis_station_name"])
+# Promote static station metadata
+    ds = ds.set_coords(["rwis_lat", "rwis_lon", "rwis_station_name"])
 
 # Now align by 'rwis_station_id' dimension
     ds = ds.set_index({"rwis_station_id": "rwis_station_id"})
