@@ -53,7 +53,10 @@ def download_rtma_grib() -> str:
 
 def interpolate_rtma_to_points(grib_file: str, rwis: pd.DataFrame) -> pd.DataFrame:
     """Return DataFrame of RTMA values at each RWIS station."""
-    ds0, ds2, ds3 = cfgrib.open_datasets(grib_file, indexpath=None)[0,2,3]  # tcc, wind, thermo
+    datasets = cfgrib.open_datasets(grib_file, indexpath=None)
+    ds0 = datasets[0]  # total cloud cover
+    ds2 = datasets[2]  # wind
+    ds3 = datasets[3]   # tcc, wind, thermo
 
     tcc = ds0.tcc
     tmp_f = (ds3.t2m - 273.15) * 9 / 5 + 32
