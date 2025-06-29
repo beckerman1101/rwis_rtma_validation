@@ -178,13 +178,23 @@ def build_snapshot(api_key: str) -> xr.Dataset:
     if merged_df.empty:
         raise ValueError("Merged dataframe is empty — no data to log.")
 
-    # Use timezone-naive UTC time
+    # Add UTC time
     merged_df["time"] = pd.Timestamp.utcnow()
-    merged_df = merged_df.drop(columns=["properties.lastUpdated"], errors="ignore")
 
+    # Set time + station ID as index for dimensions
+    merged_df = merged_df.set_index(["time", "station_id"])
 
-    # Ensure time is index
-    ds = xr.Dataset.from_dataframe(merged_df.set_index("time"))
+    # Convert to xarray Dataset
+    ds = xr.Dataset.from_dataframe(merged_df)
+
+    # Reset them to be dimensions, not coordinates
+    ds = ds.reset_coords(["time", "station_id"])
+
+    # Promote useful metadata as coordinates
+    for coord in ["station_name", "lat", "lon"]:
+        if coord in ds:
+            ds = ds.set_coords(coord)
+
     return ds
 
 
