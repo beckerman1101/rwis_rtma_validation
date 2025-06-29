@@ -201,17 +201,29 @@ def build_snapshot(api_key: str) -> xr.Dataset:
 
 def append_daily(ds: xr.Dataset) -> None:
     """Append snapshot to daily NetCDF; create new file if absent."""
-    # Ensure time is timezone-naive
+    # Ensure 'time' is timezone-naive
     if "time" in ds.indexes and hasattr(ds.indexes["time"], "tz"):
         ds = ds.assign_coords(time=ds.indexes["time"].tz_localize(None))
 
     fname = f"rwis_rtma_{pd.Timestamp.utcnow():%Y%m%d}.nc"
 
+    # Promote station metadata as coordinates (consistently)
+    required_coords = ["rwis_station_id", "rwis_lat", "rwis_lon", "rwis_station_name"]
+    for coord in required_coords:
+        if coord in ds.variables and coord not in ds.coords:
+            ds = ds.set_coords(coord)
+
     if os.path.exists(fname):
         with xr.open_dataset(fname) as existing:
+            # Also promote same coords in existing dataset
+            for coord in required_coords:
+                if coord in existing.variables and coord not in existing.coords:
+                    existing = existing.set_coords(coord)
+
             ds = xr.concat([existing, ds], dim="time")
 
     ds.to_netcdf(fname, mode="w")
+
 
 
 
