@@ -182,10 +182,14 @@ def build_snapshot(api_key: str) -> xr.Dataset:
     # Use timezone-naive UTC time
     merged_df["time"] = pd.Timestamp.utcnow()
     merged_df = merged_df.drop(columns=["properties.lastUpdated"], errors="ignore")
+    merged_df = merged_df.set_index(["time", "rwis_station_id"])
 
+# Convert to dataset
+    ds = xr.Dataset.from_dataframe(merged_df)
 
-    # Ensure time is index
-    ds = xr.Dataset.from_dataframe(merged_df.set_index("time"))
+# Promote 'rwis_lat', 'rwis_lon', 'rwis_station_name' to coordinates
+    ds = ds.set_coords(["rwis_lat", "rwis_lon", "rwis_station_name"])
+
     return ds
 
 
