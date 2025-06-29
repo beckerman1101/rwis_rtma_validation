@@ -188,7 +188,7 @@ def build_snapshot(api_key: str) -> xr.Dataset:
     ds = xr.Dataset.from_dataframe(merged_df)
 
     # Reset them to be dimensions, not coordinates
-    ds = ds.reset_coords(["time", "station_id"])
+    ds = ds.reset_coords(["time", "rwis_station_id"])
 
     # Promote useful metadata as coordinates
     for coord in ["station_name", "lat", "lon"]:
