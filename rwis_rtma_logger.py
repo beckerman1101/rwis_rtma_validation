@@ -176,19 +176,32 @@ def build_snapshot(api_key: str) -> xr.Dataset:
     cotrip_df = fetch_cotrip(api_key)
     merged_df = pair_and_merge(rtma_df, cotrip_df)
 
+    if merged_df.empty:
+        raise ValueError("Merged dataframe is empty — no data to log.")
+
     # Use timezone-naive UTC time
     merged_df["time"] = pd.Timestamp.utcnow()
 
+    # Ensure time is index
     ds = xr.Dataset.from_dataframe(merged_df.set_index("time"))
     return ds
 
 
 def append_daily(ds: xr.Dataset) -> None:
     """Append snapshot to daily NetCDF; create new file if absent."""
-    fname = f"rwis_rtma_{pd.Timestamp.now(tz='UTC'):%Y%m%d}.nc"
+    if "time" not in ds.dims and "time" not in ds.coords:
+        raise ValueError("Dataset has no 'time' dimension or coordinate.")
+
+    # Strip timezone if present
+    if "time" in ds.indexes and hasattr(ds.indexes["time"], "tz"):
+        ds = ds.assign_coords(time=ds.indexes["time"].tz_localize(None))
+
+    fname = f"rwis_rtma_{pd.Timestamp.utcnow():%Y%m%d}.nc"
+
     if os.path.exists(fname):
         with xr.open_dataset(fname) as existing:
             ds = xr.concat([existing, ds], dim="time")
+
     ds.to_netcdf(fname, mode="w")
 
 
