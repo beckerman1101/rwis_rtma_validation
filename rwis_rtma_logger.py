@@ -1,7 +1,6 @@
-#!/usr/bin/env python3
 """
 Half‑hourly RWIS + RTMA snapshot logger
---------------------------------------
+--------------------------------------More actions
 • Fetches RTMA 2.5 km analysis closest to now (–20 min safety lag)
 • Interpolates RTMA fields to every station in rwis_metadata.csv
 • Pulls CoTrip road‑weather JSON, pivots sensors → columns
@@ -179,55 +178,32 @@ def build_snapshot(api_key: str) -> xr.Dataset:
     if merged_df.empty:
         raise ValueError("Merged dataframe is empty — no data to log.")
 
-    # Add UTC timestamp (timezone-naive)
-    now = pd.Timestamp.utcnow()
-    merged_df["time"] = now
+    # Use timezone-naive UTC time
+    merged_df["time"] = pd.Timestamp.utcnow()
+    merged_df = merged_df.drop(columns=["properties.lastUpdated"], errors="ignore")
 
-# Set multi-index (time and station ID)
-    merged_df = merged_df.set_index(["time", "rwis_station_id"])
 
-# Convert to Dataset
-    ds = xr.Dataset.from_dataframe(merged_df)
-
-# Move index levels to dimensions
-    ds = ds.reset_coords(["time", "rwis_station_id"])
-
-# Promote static station metadata
-    ds = ds.set_coords(["rwis_lat", "rwis_lon", "rwis_station_name"])
-
-# Now align by 'rwis_station_id' dimension
-    ds = ds.set_index({"rwis_station_id": "rwis_station_id"})
-
+    # Ensure time is index
+    ds = xr.Dataset.from_dataframe(merged_df.set_index("time"))
     return ds
-
 
 
 def append_daily(ds: xr.Dataset) -> None:
     """Append snapshot to daily NetCDF; create new file if absent."""
-    # Ensure 'time' is timezone-naive
+    if "time" not in ds.dims and "time" not in ds.coords:
+        raise ValueError("Dataset has no 'time' dimension or coordinate.")
+
+    # Strip timezone if present
     if "time" in ds.indexes and hasattr(ds.indexes["time"], "tz"):
         ds = ds.assign_coords(time=ds.indexes["time"].tz_localize(None))
 
     fname = f"rwis_rtma_{pd.Timestamp.utcnow():%Y%m%d}.nc"
 
-    # Promote station metadata as coordinates (consistently)
-    required_coords = ["rwis_station_id", "rwis_lat", "rwis_lon", "rwis_station_name"]
-    for coord in required_coords:
-        if coord in ds.variables and coord not in ds.coords:
-            ds = ds.set_coords(coord)
-
     if os.path.exists(fname):
         with xr.open_dataset(fname) as existing:
-            # Also promote same coords in existing dataset
-            for coord in required_coords:
-                if coord in existing.variables and coord not in existing.coords:
-                    existing = existing.set_coords(coord)
-
             ds = xr.concat([existing, ds], dim="time")
 
     ds.to_netcdf(fname, mode="w")
-
-
 
 
 def main() -> None:
