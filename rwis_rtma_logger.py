@@ -182,7 +182,7 @@ def build_snapshot(api_key: str) -> xr.Dataset:
     merged_df["time"] = pd.Timestamp.utcnow()
 
     # Set time + station ID as index for dimensions
-    merged_df = merged_df.set_index(["time", "station_id"])
+    merged_df = merged_df.set_index(["time", "rwis_station_id"])
 
     # Convert to xarray Dataset
     ds = xr.Dataset.from_dataframe(merged_df)
