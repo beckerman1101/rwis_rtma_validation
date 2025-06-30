@@ -31,16 +31,11 @@ API_KEY_ENV = "COTRIP_API_KEY"       # set as secret in GitHub Actions
 
 
 def _clean_object_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Decode bytes → str and coerce numeric‑looking columns to real numbers.
-
-    The function works *in‑place* but returns *df* for chaining.
-    """
+    """Decode bytes → str and coerce numeric‑looking columns to real numbers."""
     for col in df.select_dtypes(include=["object"]).columns:
-        # First decode bytes/bytearray → str
         df[col] = df[col].apply(
             lambda x: x.decode("utf‑8") if isinstance(x, (bytes, bytearray)) else x
         )
-        # Then try to coerce to numeric; if not numeric it stays object/str
         df[col] = pd.to_numeric(df[col], errors="ignore")
     return df
 
@@ -50,19 +45,14 @@ def _clean_object_columns(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 def download_rtma_grib() -> str:
-    """Download the latest RTMA RU 2‑D var‑grid file; return local filename."""
     now = datetime.now(timezone.utc)
     day = now.strftime("%Y%m%d")
-
-    # choose previous 15‑min interval ≥ 20 min ago
     buffer = now - timedelta(minutes=20)
     cycle_stamp = f"{buffer:%H}{(buffer.minute // 15) * 15:02d}"
-
     url = (
         f"{RTMA_BASE}/rtma2p5_ru.{day}/rtma2p5_ru.t{cycle_stamp}z.2dvarges_ndfd.grb2"
     )
     fn = "rtma.bin"
-
     print(f"Downloading RTMA from: {url}")
     r = requests.get(url, stream=True, timeout=60)
     r.raise_for_status()
@@ -73,13 +63,10 @@ def download_rtma_grib() -> str:
 
 
 def interpolate_rtma_to_points(grib_file: str, rwis: pd.DataFrame) -> pd.DataFrame:
-    """Return DataFrame of RTMA values at each RWIS station."""
-
     try:
         datasets = cfgrib.open_datasets(grib_file, indexpath=None)
         print(f"Found {len(datasets)} datasets in GRIB file")
 
-        # Identify datasets containing variables of interest
         tcc_ds = wind_ds = thermo_ds = None
         for ds in datasets:
             vars_in_ds = list(ds.data_vars.keys())
@@ -90,7 +77,6 @@ def interpolate_rtma_to_points(grib_file: str, rwis: pd.DataFrame) -> pd.DataFra
             if any(v in vars_in_ds for v in ["t2m", "d2m"]):
                 thermo_ds = ds
 
-        # Fallback assignment if not explicitly located
         tcc_ds = tcc_ds or datasets[0]
         wind_ds = wind_ds or datasets[-1]
         thermo_ds = thermo_ds or datasets[-1]
@@ -109,11 +95,9 @@ def interpolate_rtma_to_points(grib_file: str, rwis: pd.DataFrame) -> pd.DataFra
         wgust = _safe_extract(wind_ds, "i10fg", 0)
         wspd = _safe_extract(wind_ds, "si10", 0)
 
-        # Kelvin → Fahrenheit
         tmp_f = (tmp_k - 273.15) * 9 / 5 + 32
         dpt_f = (dpt_k - 273.15) * 9 / 5 + 32
 
-        # Coordinate handling
         lat = tcc.latitude.values
         lon = tcc.longitude.values
         if lon.max() > 180:
@@ -151,20 +135,12 @@ def interpolate_rtma_to_points(grib_file: str, rwis: pd.DataFrame) -> pd.DataFra
 
     except Exception as exc:
         print(f"Error processing GRIB file: {exc}")
-        return pd.DataFrame(
-            columns=[
-                "station_id",
-                "station_name",
-                "lat",
-                "lon",
-                "cloud_cover",
-                "rtma_temps",
-                "rtma_dp",
-                "rtma_wind_direction",
-                "rtma_wind_gust",
-                "rtma_wind_speed",
-            ]
-        )
+        return pd.DataFrame(columns=[
+            "station_id", "station_name", "lat", "lon", "cloud_cover",
+            "rtma_temps", "rtma_dp", "rtma_wind_direction",
+            "rtma_wind_gust", "rtma_wind_speed"
+        ])
+
 
 
 # ---------------------------------------------------------------------------
