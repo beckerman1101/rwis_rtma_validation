@@ -243,7 +243,7 @@ def fetch_cotrip(api_key: str) -> pd.DataFrame:
                 pivot[col] = pivot[col].astype(str)
         
         # Ensure numeric columns are float
-        numeric_cols = ["lon", "lat", "geometry.srid"]
+        numeric_cols = ["lon", "lat", "geometry.srid","visibility","min temperature","dew point","gust wind speed","max temperature","temperature","average wind speed","road surface friction index","humidity"]
         for col in numeric_cols:
             if col in pivot.columns:
                 pivot[col] = pd.to_numeric(pivot[col], errors='coerce')
