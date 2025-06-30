@@ -410,22 +410,41 @@ def append_daily(ds: xr.Dataset) -> None:
         except Exception as e:
             print(f"Error reading existing file, creating new one: {e}")
 
-    # Improved encoding - only encode object dtypes that are actually strings
+    # Improved encoding - handle different data types properly
     encoding = {}
+    
+    # Process data variables
     for var in ds.data_vars:
         if ds[var].dtype == 'object':
-            # Check if it's actually string data
-            sample_val = ds[var].values.flat[0] if ds[var].size > 0 else None
-            if isinstance(sample_val, str):
-                # Use unicode string encoding instead of bytes
-                encoding[var] = {'dtype': 'U64'}  # Unicode string, not bytes
+            # Check if it's actually string data or datetime
+            if ds[var].size > 0:
+                sample_val = ds[var].values.flat[0]
+                if isinstance(sample_val, str):
+                    encoding[var] = {'dtype': 'U64'}  # Unicode string
+                elif isinstance(sample_val, pd.Timestamp) or hasattr(sample_val, 'strftime'):
+                    # Convert datetime to string for NetCDF storage
+                    ds[var] = ds[var].astype(str)
+                    encoding[var] = {'dtype': 'U32'}  # Datetime as string
+                elif pd.isna(sample_val):
+                    # Handle NaN values - convert to string
+                    ds[var] = ds[var].astype(str)
+                    encoding[var] = {'dtype': 'U32'}
     
-    # Also handle coordinate variables
+    # Process coordinate variables
     for coord in ds.coords:
         if ds[coord].dtype == 'object':
-            sample_val = ds[coord].values.flat[0] if ds[coord].size > 0 else None
-            if isinstance(sample_val, str):
-                encoding[coord] = {'dtype': 'U64'}
+            if ds[coord].size > 0:
+                sample_val = ds[coord].values.flat[0]
+                if isinstance(sample_val, str):
+                    encoding[coord] = {'dtype': 'U64'}
+                elif isinstance(sample_val, pd.Timestamp) or hasattr(sample_val, 'strftime'):
+                    # Convert datetime to string for NetCDF storage
+                    ds = ds.assign_coords({coord: ds[coord].astype(str)})
+                    encoding[coord] = {'dtype': 'U32'}
+                elif pd.isna(sample_val):
+                    # Handle NaN values - convert to string
+                    ds = ds.assign_coords({coord: ds[coord].astype(str)})
+                    encoding[coord] = {'dtype': 'U32'}
     
     ds.to_netcdf(fname, mode="w", encoding=encoding)
     print(f"Saved to: {fname}")
