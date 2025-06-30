@@ -1,13 +1,9 @@
 """
-Half‑hourly RWIS + RTMA snapshot loggerAdd commentMore actions
---------------------------------------More actions
-• Fetches RTMA 2.5 km analysis closest to now (–20 min safety lag)
 Half‑hourly RWIS + RTMA snapshot logger
 --------------------------------------
 • Fetches RTMA 2.5 km analysis closest to now (–20 min safety lag)
 • Interpolates RTMA fields to every station in rwis_metadata.csv
 • Pulls CoTrip road‑weather JSON, pivots sensors → columns
-• Spatially pairs CoTrip points to nearest RWIS station (≤0.005° ≈ 500 m)
 • Spatially pairs CoTrip points to nearest RWIS station (≤0.005° ≈ 500 m)
 • Merges and trims columns, then appends to a daily NetCDF file
 """
@@ -27,8 +23,6 @@ import cfgrib
 # ---------------------------------------------------------------------------
 RWIS_META_CSV = "rwis_metadata.csv"  # local metadata file
 COTRIP_URL = "https://data.cotrip.org/api/v1/weatherStations"
-PAIR_TOLERANCE_DEG = 0.005           # KD‑tree pairing radius (≈500 m)
-RECENT_MIN = 20                      # CoTrip obs must be ≤ 20 min old
 PAIR_TOLERANCE_DEG = 0.005           # KD‑tree pairing radius (≈500 m)
 RECENT_MIN = 20                      # CoTrip obs must be ≤ 20 min old
 RTMA_BASE = "https://nomads.ncep.noaa.gov/pub/data/nccf/com/rtma/prod"
@@ -41,7 +35,6 @@ def download_rtma_grib() -> str:
     now = datetime.now(timezone.utc)
     day = now.strftime("%Y%m%d")
 
-    # choose previous 15‑min interval ≥ 20 min ago
     # choose previous 15‑min interval ≥ 20 min ago
     buffer = now - timedelta(minutes=20)
     cycle_stamp = f"{buffer:%H}{(buffer.minute // 15) * 15:02d}"
@@ -60,27 +53,6 @@ def download_rtma_grib() -> str:
 
 def interpolate_rtma_to_points(grib_file: str, rwis: pd.DataFrame) -> pd.DataFrame:
     """Return DataFrame of RTMA values at each RWIS station."""
-    datasets = cfgrib.open_datasets(grib_file, indexpath=None)
-    ds0 = datasets[0]  # total cloud cover
-    ds2 = datasets[2]  # wind
-    ds3 = datasets[3]   # tcc, wind, thermo
-
-    tcc = ds0.tcc
-    tmp_f = (ds3.t2m - 273.15) * 9 / 5 + 32
-    dpt_f = (ds3.d2m - 273.15) * 9 / 5 + 32
-    wdir = ds2.wdir10
-    wgust = ds2.i10fg
-    wspd = ds2.si10
-
-    lat, lon = tcc.latitude.values, tcc.longitude.values - 360
-    tree = cKDTree(np.column_stack((lat.ravel(), lon.ravel())))
-
-    records = []
-    for _, stn in rwis.iterrows():
-        _, flat = tree.query([stn.lat, stn.lon])
-        iy, ix = np.unravel_index(flat, lat.shape)
-        records.append(
-            {
     try:
         datasets = cfgrib.open_datasets(grib_file, indexpath=None)
         print(f"Found {len(datasets)} datasets in GRIB file")
@@ -145,30 +117,29 @@ def interpolate_rtma_to_points(grib_file: str, rwis: pd.DataFrame) -> pd.DataFra
             _, flat = tree.query([stn.lat, stn.lon])
             iy, ix = np.unravel_index(flat, lat.shape)
             
-            # Safe value extraction with bounds checking
+            # Safe value extraction with bounds checking and proper type conversion
             def safe_value(arr, ix, iy):
                 try:
                     if hasattr(arr, 'values'):
-                        return float(arr.values[iy, ix])
+                        val = arr.values[iy, ix]
                     else:
-                        return float(arr[iy, ix])
-                except (IndexError, ValueError):
+                        val = arr[iy, ix]
+                    
+                    # Convert numpy types to native Python float
+                    if isinstance(val, (np.floating, np.integer)):
+                        return float(val)
+                    elif np.isscalar(val):
+                        return float(val)
+                    else:
+                        return np.nan
+                except (IndexError, ValueError, TypeError):
                     return np.nan
             
             records.append({
-                "station_id": stn.stid,
-                "station_name": stn.station_name,
-                "lat": stn.lat,
-                "lon": stn.lon,
-                "cloud_cover": float(tcc.values[iy, ix]),
-                "rtma_temps": float(tmp_f.values[ix, iy]),
-                "rtma_dp": float(dpt_f.values[ix, iy]),
-                "rtma_wind_direction": float(wdir.values[ix, iy]),
-                "rtma_wind_gust": float(wgust.values[ix, iy]),
-                "rtma_wind_speed": float(wspd.values[ix, iy]),
-            }
-        )
-    return pd.DataFrame.from_records(records)
+                "station_id": str(stn.stid),  # Ensure string type
+                "station_name": str(stn.station_name),  # Ensure string type
+                "lat": float(stn.lat),  # Ensure float type
+                "lon": float(stn.lon),  # Ensure float type  
                 "cloud_cover": safe_value(tcc, ix, iy),
                 "rtma_temps": safe_value(tmp_f, ix, iy),
                 "rtma_dp": safe_value(dpt_f, ix, iy),
@@ -191,40 +162,6 @@ def interpolate_rtma_to_points(grib_file: str, rwis: pd.DataFrame) -> pd.DataFra
 
 def fetch_cotrip(api_key: str) -> pd.DataFrame:
     """Download CoTrip JSON, pivot sensors → columns, parse timestamps."""
-    r = requests.get(f"{COTRIP_URL}?apiKey={api_key}", timeout=60)
-    r.raise_for_status()
-    df = pd.json_normalize(r.json()["features"]).explode("properties.sensors")
-
-    sensors = pd.json_normalize(df["properties.sensors"]).rename(columns={"type": "sensor_type"})
-    meta = df.drop(columns=["properties.sensors"]).reset_index(drop=True)
-    merged = pd.concat([meta, sensors], axis=1)
-
-    merged[["lon", "lat"]] = merged["geometry.coordinates"].apply(pd.Series)
-
-    pivot = (
-        merged.pivot_table(
-            index=[
-                "properties.name",
-                "lon",
-                "lat",
-                "geometry.type",
-                "geometry.srid",
-                "properties.lastUpdated",
-                "properties.nativeId",
-                "properties.direction",
-            ],
-            columns="sensor_type",
-            values="currentReading",
-            aggfunc="first",
-        )
-        .reset_index()
-        .copy()
-    )
-
-    pivot["properties.lastUpdated"] = pd.to_datetime(
-        pivot["properties.lastUpdated"], utc=True, errors="coerce"
-    )
-    return pivot
     try:
         r = requests.get(f"{COTRIP_URL}?apiKey={api_key}", timeout=60)
         r.raise_for_status()
@@ -261,12 +198,12 @@ def fetch_cotrip(api_key: str) -> pd.DataFrame:
         # Safe coordinate extraction
         if "geometry.coordinates" in merged.columns:
             coords = merged["geometry.coordinates"].apply(
-                lambda x: pd.Series(x) if isinstance(x, list) and len(x) >= 2 else pd.Series([None, None])
+                lambda x: pd.Series([float(x[0]), float(x[1])]) if isinstance(x, list) and len(x) >= 2 else pd.Series([np.nan, np.nan])
             )
             merged[["lon", "lat"]] = coords[[0, 1]]
         else:
             print("Warning: No geometry coordinates in CoTrip data")
-            merged[["lon", "lat"]] = [None, None]
+            merged[["lon", "lat"]] = [np.nan, np.nan]
 
         # Safe pivot with error handling
         try:
@@ -293,11 +230,23 @@ def fetch_cotrip(api_key: str) -> pd.DataFrame:
             print(f"Error during pivot: {e}")
             return pd.DataFrame()
 
-        # Safe timestamp parsing
+        # Safe timestamp parsing - keep as datetime
         if "properties.lastUpdated" in pivot.columns:
             pivot["properties.lastUpdated"] = pd.to_datetime(
                 pivot["properties.lastUpdated"], utc=True, errors="coerce"
             )
+        
+        # Ensure string columns are properly typed
+        string_cols = ["properties.name", "geometry.type", "properties.nativeId", "properties.direction"]
+        for col in string_cols:
+            if col in pivot.columns:
+                pivot[col] = pivot[col].astype(str)
+        
+        # Ensure numeric columns are float
+        numeric_cols = ["lon", "lat", "geometry.srid"]
+        for col in numeric_cols:
+            if col in pivot.columns:
+                pivot[col] = pd.to_numeric(pivot[col], errors='coerce')
         
         return pivot
         
@@ -308,8 +257,6 @@ def fetch_cotrip(api_key: str) -> pd.DataFrame:
 
 def pair_and_merge(rwis_pts: pd.DataFrame, cotrip: pd.DataFrame) -> pd.DataFrame:
     """Spatial/temporal join: nearest RWIS within tolerance + recent timestamp."""
-    rwis_xy = rwis_pts[["lat", "lon"]].to_numpy()
-    cotrip_xy = cotrip[["lat", "lon"]].to_numpy()
     if rwis_pts.empty or cotrip.empty:
         print("Warning: Empty input DataFrames for pairing")
         return pd.DataFrame()
@@ -342,8 +289,6 @@ def pair_and_merge(rwis_pts: pd.DataFrame, cotrip: pd.DataFrame) -> pd.DataFrame
     tree = cKDTree(rwis_xy)
     dist, idx = tree.query(cotrip_xy, distance_upper_bound=PAIR_TOLERANCE_DEG)
 
-    recent_cut = cotrip["properties.lastUpdated"].max() - timedelta(minutes=RECENT_MIN)
-    mask = (dist != np.inf) & (cotrip["properties.lastUpdated"] >= recent_cut)
     # Safe timestamp filtering
     try:
         recent_cut = cotrip_clean["properties.lastUpdated"].max() - timedelta(minutes=RECENT_MIN)
@@ -352,22 +297,17 @@ def pair_and_merge(rwis_pts: pd.DataFrame, cotrip: pd.DataFrame) -> pd.DataFrame
         print(f"Error in timestamp filtering: {e}")
         mask = dist != np.inf
 
-    rwis_match = pd.DataFrame(index=cotrip.index, columns=rwis_pts.columns)
-    rwis_match.loc[dist != np.inf] = rwis_pts.iloc[idx[dist != np.inf]].values
     rwis_match = pd.DataFrame(index=cotrip_clean.index, columns=rwis_clean.columns)
     valid_matches = dist != np.inf
     if valid_matches.any():
         rwis_match.loc[valid_matches] = rwis_clean.iloc[idx[valid_matches]].values
 
-    combined = pd.concat([cotrip.reset_index(drop=True), rwis_match.add_prefix("rwis_")], axis=1)
     combined = pd.concat([cotrip_clean.reset_index(drop=True), rwis_match.add_prefix("rwis_")], axis=1)
 
-    # drop CoTrip fields you said you don't want
     # Drop unwanted columns
     drop = [
         "precipitation accumulation 12hr",
         "precipitation accumulation 1hr",
-        "precipitation accumulation 1hr", 
         "precipitation accumulation 24hr",
         "precipitation accumulation 3hr",
         "precipitation accumulation 6hr",
@@ -384,7 +324,6 @@ def pair_and_merge(rwis_pts: pd.DataFrame, cotrip: pd.DataFrame) -> pd.DataFrame
     ]
     combined = combined.drop(columns=[c for c in drop if c in combined.columns])
 
-    return combined[mask].reset_index(drop=True)
     result = combined[mask].reset_index(drop=True)
     print(f"Paired {len(result)} stations successfully")
     return result
@@ -411,7 +350,7 @@ def build_snapshot(api_key: str) -> xr.Dataset:
     if merged_df.empty:
         raise ValueError("Merged dataframe is empty — no data to log.")
 
-    # Add UTC time
+    # Add UTC time as datetime (not string)
     merged_df["time"] = pd.Timestamp.utcnow()
 
     # Ensure we have a valid station ID column
@@ -425,23 +364,26 @@ def build_snapshot(api_key: str) -> xr.Dataset:
         print("Warning: No station ID column found, using index")
         merged_df["station_index"] = range(len(merged_df))
         station_id_col = "station_index"
+        merged_df[station_id_col] = merged_df[station_id_col].astype(str)
+
+    # Ensure station IDs are strings
+    merged_df[station_id_col] = merged_df[station_id_col].astype(str)
 
     # Set time + station ID as index for dimensions
-    merged_df = merged_df.set_index(["time", "rwis_station_id"])
     merged_df = merged_df.set_index(["time", station_id_col])
 
     # Convert to xarray Dataset
     ds = xr.Dataset.from_dataframe(merged_df)
 
-    # Reset them to be dimensions, not coordinates
-    ds = ds.reset_coords(["time", "rwis_station_id"])
-
-    # Promote useful metadata as coordinates
     # Promote useful metadata as coordinates if they exist
-    for coord in ["station_name", "lat", "lon"]:
-        if coord in ds:
-            ds = ds.set_coords(coord)
-        coord_cols = [c for c in ds.data_vars if coord in c.lower()]
+    coord_mappings = {
+        "station_name": ["station_name", "properties.name", "rwis_station_name"],
+        "lat": ["lat", "rwis_lat"],
+        "lon": ["lon", "rwis_lon"]
+    }
+    
+    for coord_name, possible_cols in coord_mappings.items():
+        coord_cols = [c for c in ds.data_vars if c in possible_cols]
         if coord_cols:
             # Use the first matching coordinate column
             ds = ds.set_coords(coord_cols[0])
@@ -454,17 +396,13 @@ def append_daily(ds: xr.Dataset) -> None:
     if "time" not in ds.dims and "time" not in ds.coords:
         raise ValueError("Dataset has no 'time' dimension or coordinate.")
 
-    # Strip timezone if present
+    # Ensure time is datetime, not string
     if "time" in ds.indexes and hasattr(ds.indexes["time"], "tz"):
         ds = ds.assign_coords(time=ds.indexes["time"].tz_localize(None))
 
     fname = f"rwis_rtma_{pd.Timestamp.utcnow():%Y%m%d}.nc"
 
     if os.path.exists(fname):
-        with xr.open_dataset(fname) as existing:
-            ds = xr.concat([existing, ds], dim="time")
-
-    ds.to_netcdf(fname, mode="w")
         try:
             with xr.open_dataset(fname) as existing:
                 ds = xr.concat([existing, ds], dim="time")
@@ -472,11 +410,22 @@ def append_daily(ds: xr.Dataset) -> None:
         except Exception as e:
             print(f"Error reading existing file, creating new one: {e}")
 
-    # Add encoding to prevent issues with string variables
+    # Improved encoding - only encode object dtypes that are actually strings
     encoding = {}
     for var in ds.data_vars:
         if ds[var].dtype == 'object':
-            encoding[var] = {'dtype': 'S64'}
+            # Check if it's actually string data
+            sample_val = ds[var].values.flat[0] if ds[var].size > 0 else None
+            if isinstance(sample_val, str):
+                # Use unicode string encoding instead of bytes
+                encoding[var] = {'dtype': 'U64'}  # Unicode string, not bytes
+    
+    # Also handle coordinate variables
+    for coord in ds.coords:
+        if ds[coord].dtype == 'object':
+            sample_val = ds[coord].values.flat[0] if ds[coord].size > 0 else None
+            if isinstance(sample_val, str):
+                encoding[coord] = {'dtype': 'U64'}
     
     ds.to_netcdf(fname, mode="w", encoding=encoding)
     print(f"Saved to: {fname}")
@@ -487,9 +436,6 @@ def main() -> None:
     if not api_key:
         raise RuntimeError(f"Set CoTrip API key in env var {API_KEY_ENV}")
 
-    ds = build_snapshot(api_key)
-    append_daily(ds)
-    print(f"[{datetime.utcnow():%Y-%m-%d %H:%M}] snapshot appended.")
     try:
         ds = build_snapshot(api_key)
         append_daily(ds)
@@ -499,5 +445,5 @@ def main() -> None:
         raise
 
 
-if __name__ == "__main__":Add commentMore actions
+if __name__ == "__main__":
     main()
