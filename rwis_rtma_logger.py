@@ -33,7 +33,11 @@ API_KEY_ENV = "COTRIP_API_KEY"       # set as secret in GitHub Actions
 def download_rtma_grib() -> str:
     """Download the latest RTMA RU 2‑D var‑grid file; return local filename."""
     now = datetime.now(timezone.utc)
-    day = now.strftime("%Y%m%d")
+    buffer = now - timedelta(minutes=20)
+    cycle_hour = buffer.strftime("%H")
+    cycle_min = f"{(buffer.minute // 15) * 15:02d}"
+    cycle_stamp = f"{cycle_hour}{cycle_min}"
+    day = buffer.strftime("%Y%m%d")
 
     # choose previous 15‑min interval ≥ 20 min ago
     buffer = now - timedelta(minutes=20)
@@ -42,13 +46,15 @@ def download_rtma_grib() -> str:
     url = f"{RTMA_BASE}/rtma2p5_ru.{day}/rtma2p5_ru.t{cycle_stamp}z.2dvarges_ndfd.grb2"
     fn = "rtma.bin"
 
+    timestamp = pd.Timestamp(f"{day}T{cycle_hour}:{cycle_min}:00Z")
+
     print(f"Downloading RTMA from: {url}")
     r = requests.get(url, stream=True, timeout=60)
     r.raise_for_status()
     with open(fn, "wb") as fh:
         for chunk in r.iter_content(8192):
             fh.write(chunk)
-    return fn
+    return fn, timestamp
 
 
 def interpolate_rtma_to_points(grib_file: str, rwis: pd.DataFrame) -> pd.DataFrame:
@@ -338,7 +344,7 @@ def build_snapshot(api_key: str) -> xr.Dataset:
     rwis_meta = pd.read_csv(RWIS_META_CSV)
     print(f"Loaded {len(rwis_meta)} RWIS stations")
 
-    grib = download_rtma_grib()
+    grib, snapshot_time = download_rtma_grib()
     rtma_df = interpolate_rtma_to_points(grib, rwis_meta)
     print(f"Interpolated RTMA to {len(rtma_df)} stations")
 
@@ -351,7 +357,7 @@ def build_snapshot(api_key: str) -> xr.Dataset:
         raise ValueError("Merged dataframe is empty — no data to log.")
 
     # Add UTC time as datetime (not string)
-    merged_df["time"] = pd.Timestamp.utcnow()
+    merged_df["time"] = snapshot_time
 
     # Ensure we have a valid station ID column
     station_id_col = None
@@ -371,7 +377,7 @@ def build_snapshot(api_key: str) -> xr.Dataset:
 
     # Set time + station ID as index for dimensions
     merged_df = merged_df.set_index(["time", station_id_col])
-
+    merged_df.sort_values("time")
     # Convert to xarray Dataset
     ds = xr.Dataset.from_dataframe(merged_df)
 
@@ -417,7 +423,7 @@ def append_daily(ds: xr.Dataset) -> None:
                     print(f"Removing {len(combined.time) - len(unique_indices)} duplicate timestamps")
                     combined = combined.isel(time=unique_indices)
                 
-                ds = combined
+                ds = combined.sortby("time")
                 print(f"Appended to existing file: {fname}")
                 print(f"Total time range: {ds.time.min().values} to {ds.time.max().values}")
                 print(f"Total snapshots: {len(ds.time)}")
