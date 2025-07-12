@@ -376,6 +376,9 @@ def build_snapshot(api_key: str) -> xr.Dataset:
 
     # Ensure station IDs are strings
     merged_df[station_id_col] = merged_df[station_id_col].astype(str)
+    # Ensure valid_time is timezone-naive (required for NetCDF)
+    if "valid_time" in merged_df.columns:
+        merged_df["valid_time"] = pd.to_datetime(merged_df["valid_time"], utc=True).dt.tz_localize(None)
 
     # Set time + station ID as index for dimensions
     merged_df = merged_df.set_index(["valid_time", station_id_col])
