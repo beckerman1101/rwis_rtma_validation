@@ -463,13 +463,26 @@ def append_daily(ds: xr.Dataset) -> None:
                     ds = ds.assign_coords({coord: ds[coord].astype(str)})
                     encoding[coord] = {'dtype': 'U32'}
     
-    # Add compression for better file sizes and performance
-    for var in ds.data_vars:
-        if var not in encoding:
-            encoding[var] = {}
-        encoding[var].update({'zlib': True, 'complevel': 4})
-    
-    ds.to_netcdf(fname, mode="w", encoding=encoding)
+    # Use netCDF4 backend for compression support, fallback to scipy without compression
+    try:
+        # Try netCDF4 backend with compression
+        for var in ds.data_vars:
+            if var not in encoding:
+                encoding[var] = {}
+            encoding[var].update({'zlib': True, 'complevel': 4})
+        
+        ds.to_netcdf(fname, mode="w", encoding=encoding, engine='netcdf4')
+        print(f"Saved with netCDF4 backend and compression")
+    except (ImportError, ValueError) as e:
+        # Fallback to scipy backend without compression
+        print(f"NetCDF4 not available, using scipy backend: {e}")
+        # Remove compression from encoding
+        for var in encoding:
+            if isinstance(encoding[var], dict):
+                encoding[var].pop('zlib', None)
+                encoding[var].pop('complevel', None)
+        
+        ds.to_netcdf(fname, mode="w", encoding=encoding)
     print(f"Saved to: {fname}")
 
 
