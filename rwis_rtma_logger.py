@@ -410,8 +410,10 @@ def append_daily(ds: xr.Dataset) -> None:
     # Ensure time is datetime, not string
     # Ensure 'valid_time' is a coordinate
     if "valid_time" in ds.coords:
-    # Remove timezone to make it naive datetime64
-        ds = ds.assign_coords(valid_time=ds["valid_time"].dt.tz_convert(None))
+    # Convert to numpy datetime64 without timezone
+        times = pd.to_datetime(ds["valid_time"].values).tz_convert(None).to_numpy()
+        ds = ds.assign_coords(valid_time=times)
+
     elif "valid_time" in ds.dims:
     # If it's a dimension only
         ds["valid_time"] = ds["valid_time"].dt.tz_convert(None)
