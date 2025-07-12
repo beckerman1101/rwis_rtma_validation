@@ -333,6 +333,8 @@ def pair_and_merge(rwis_pts: pd.DataFrame, cotrip: pd.DataFrame) -> pd.DataFrame
 
     result = combined[mask].reset_index(drop=True)
     print(f"Paired {len(result)} stations successfully")
+    if "valid_time" in rwis_pts.columns:
+        result["valid_time"] = rwis_pts["valid_time"].iloc[0]
     return result
 
 
