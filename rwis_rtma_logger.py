@@ -347,6 +347,7 @@ def build_snapshot(api_key: str) -> xr.Dataset:
 
     grib, snapshot_time = download_rtma_grib()
     rtma_df = interpolate_rtma_to_points(grib, rwis_meta)
+    rtma_df["valid_time"] = pd.to_datetime(snapshot_time)
     print(f"Interpolated RTMA to {len(rtma_df)} stations")
 
     cotrip_df = fetch_cotrip(api_key)
