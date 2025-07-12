@@ -405,8 +405,17 @@ def append_daily(ds: xr.Dataset) -> None:
         raise ValueError("Dataset has no 'time' dimension or coordinate.")
 
     # Ensure time is datetime, not string
-    if "valid_time" in ds.indexes and hasattr(ds.indexes["valid_time"], "tz"):
-        ds = ds.assign_coords(time=ds.indexes["valid_time"].tz_localize(None))
+    # Ensure 'valid_time' is a coordinate
+    if "valid_time" in ds.coords:
+    # Remove timezone to make it naive datetime64
+        ds = ds.assign_coords(valid_time=ds["valid_time"].dt.tz_localize(None))
+    elif "valid_time" in ds.dims:
+    # If it's a dimension only
+        ds["valid_time"] = ds["valid_time"].dt.tz_localize(None)
+
+# Also assign to 'time' coordinate
+    ds = ds.assign_coords(time=ds["valid_time"])
+
 
     fname = f"rwis_rtma_{pd.Timestamp.utcnow():%Y%m%d}.nc"
 
