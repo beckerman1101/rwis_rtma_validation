@@ -152,6 +152,7 @@ def interpolate_rtma_to_points(grib_file: str, rwis: pd.DataFrame) -> pd.DataFra
                 "rtma_wind_direction": safe_value(wdir, ix, iy),
                 "rtma_wind_gust": safe_value(wgust, ix, iy),
                 "rtma_wind_speed": safe_value(wspd, ix, iy),
+                "valid_time":buffer
             })
         
         return pd.DataFrame.from_records(records)
@@ -357,8 +358,6 @@ def build_snapshot(api_key: str) -> xr.Dataset:
         raise ValueError("Merged dataframe is empty — no data to log.")
 
     # Add UTC time as datetime (not string)
-    merged_df["time"] = snapshot_time
-
     # Ensure we have a valid station ID column
     station_id_col = None
     for col in ["rwis_station_id", "station_id", "rwis_stid"]:
@@ -376,8 +375,8 @@ def build_snapshot(api_key: str) -> xr.Dataset:
     merged_df[station_id_col] = merged_df[station_id_col].astype(str)
 
     # Set time + station ID as index for dimensions
-    merged_df = merged_df.set_index(["time", station_id_col])
-    merged_df.sort_values("time")
+    merged_df = merged_df.set_index(["valid_time", station_id_col])
+    merged_df.sort_values("valid_time")
     # Convert to xarray Dataset
     ds = xr.Dataset.from_dataframe(merged_df)
 
