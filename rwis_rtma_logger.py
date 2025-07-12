@@ -152,7 +152,7 @@ def interpolate_rtma_to_points(grib_file: str, rwis: pd.DataFrame) -> pd.DataFra
                 "rtma_wind_direction": safe_value(wdir, ix, iy),
                 "rtma_wind_gust": safe_value(wgust, ix, iy),
                 "rtma_wind_speed": safe_value(wspd, ix, iy),
-                "valid_time":buffer
+                "valid_time": datetime.now(timezone.utc)
             })
         
         return pd.DataFrame.from_records(records)
@@ -398,12 +398,12 @@ def build_snapshot(api_key: str) -> xr.Dataset:
 
 def append_daily(ds: xr.Dataset) -> None:
     """Append snapshot to daily NetCDF; create new file if absent."""
-    if "time" not in ds.dims and "time" not in ds.coords:
+    if "valid_time" not in ds.dims and "valid_time" not in ds.coords:
         raise ValueError("Dataset has no 'time' dimension or coordinate.")
 
     # Ensure time is datetime, not string
-    if "time" in ds.indexes and hasattr(ds.indexes["time"], "tz"):
-        ds = ds.assign_coords(time=ds.indexes["time"].tz_localize(None))
+    if "valid_time" in ds.indexes and hasattr(ds.indexes["valid_time"], "tz"):
+        ds = ds.assign_coords(time=ds.indexes["valid_time"].tz_localize(None))
 
     fname = f"rwis_rtma_{pd.Timestamp.utcnow():%Y%m%d}.nc"
 
@@ -411,18 +411,18 @@ def append_daily(ds: xr.Dataset) -> None:
         try:
             with xr.open_dataset(fname) as existing:
                 # Combine datasets
-                combined = xr.concat([existing, ds], dim="time")
+                combined = xr.concat([existing, ds], dim="valid_time")
                 
                 # CRITICAL FIX: Sort by time to ensure chronological order
-                combined = combined.sortby("time")
+                combined = combined.sortby("valid_time")
                 
                 # Optional: Remove duplicate timestamps if they exist
-                _, unique_indices = np.unique(combined.time.values, return_index=True)
-                if len(unique_indices) < len(combined.time):
-                    print(f"Removing {len(combined.time) - len(unique_indices)} duplicate timestamps")
+                _, unique_indices = np.unique(combined.valid_time.values, return_index=True)
+                if len(unique_indices) < len(combined.valid_time):
+                    print(f"Removing {len(combined.valid_time) - len(unique_indices)} duplicate timestamps")
                     combined = combined.isel(time=unique_indices)
                 
-                ds = combined.sortby("time")
+                ds = combined.sortby("valid_time")
                 print(f"Appended to existing file: {fname}")
                 print(f"Total time range: {ds.time.min().values} to {ds.time.max().values}")
                 print(f"Total snapshots: {len(ds.time)}")
