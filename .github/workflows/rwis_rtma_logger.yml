@@ -37,13 +37,18 @@ jobs:
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@users.noreply.github.com"
-
           $filename = "rwis_rtma_$((Get-Date).ToUniversalTime().ToString('yyyyMMdd')).nc"
-
           if (Test-Path $filename) {
             git add $filename
-            git commit -m "Update NetCDF snapshot for $((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd'))" || echo "No changes to commit"
-            git push
+            if (git diff --cached --quiet) {
+              Write-Output "No changes to commit in $filename"
+            } else {
+              git pull origin main --rebase
+
+              git commit -m "Update NetCDF snapshot for $((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd'))"
+
+              git push origin main
+            }
           } else {
             Write-Output "No NetCDF file found to commit."
           }
