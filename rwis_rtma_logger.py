@@ -405,10 +405,27 @@ def append_daily(ds: xr.Dataset) -> None:
     if os.path.exists(fname):
         try:
             with xr.open_dataset(fname) as existing:
-                ds = xr.concat([existing, ds], dim="time")
-            print(f"Appended to existing file: {fname}")
+                # Combine datasets
+                combined = xr.concat([existing, ds], dim="time")
+                
+                # CRITICAL FIX: Sort by time to ensure chronological order
+                combined = combined.sortby("time")
+                
+                # Optional: Remove duplicate timestamps if they exist
+                _, unique_indices = np.unique(combined.time.values, return_index=True)
+                if len(unique_indices) < len(combined.time):
+                    print(f"Removing {len(combined.time) - len(unique_indices)} duplicate timestamps")
+                    combined = combined.isel(time=unique_indices)
+                
+                ds = combined
+                print(f"Appended to existing file: {fname}")
+                print(f"Total time range: {ds.time.min().values} to {ds.time.max().values}")
+                print(f"Total snapshots: {len(ds.time)}")
+                
         except Exception as e:
             print(f"Error reading existing file, creating new one: {e}")
+    else:
+        print(f"Creating new daily file: {fname}")
 
     # Improved encoding - handle different data types properly
     encoding = {}
@@ -445,6 +462,12 @@ def append_daily(ds: xr.Dataset) -> None:
                     # Handle NaN values - convert to string
                     ds = ds.assign_coords({coord: ds[coord].astype(str)})
                     encoding[coord] = {'dtype': 'U32'}
+    
+    # Add compression for better file sizes and performance
+    for var in ds.data_vars:
+        if var not in encoding:
+            encoding[var] = {}
+        encoding[var].update({'zlib': True, 'complevel': 4})
     
     ds.to_netcdf(fname, mode="w", encoding=encoding)
     print(f"Saved to: {fname}")
