@@ -262,80 +262,155 @@ def fetch_cotrip(api_key: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+# Add this constant near the top with your other configuration constants
+SELECTED_STATIONS = {
+    'W206', 'W209', 'W253', 'W224', 'W199', 'W195', 'W211',
+    'E171', 'E238', 'E237', 'E227', 'E235', 'E216', 'E234', 
+    'E240', 'E213', 'E232'
+}
+
+def extract_station_code(station_name):
+    """Extract 4-character station code (direction + 3 digits) from station name."""
+    import re
+    if not isinstance(station_name, str):
+        return None
+    
+    # Look for pattern: E/W followed by 3 digits
+    match = re.search(r'[EW]\d{3}', station_name.upper())
+    return match.group(0) if match else None
+
 def pair_and_merge(rwis_pts: pd.DataFrame, cotrip: pd.DataFrame) -> pd.DataFrame:
-    """Spatial/temporal join: nearest RWIS within tolerance + recent timestamp."""
-    if rwis_pts.empty or cotrip.empty:
-        print("Warning: Empty input DataFrames for pairing")
+    """Spatial/temporal join: Create records for all selected stations, with NaNs for stale data."""
+    if rwis_pts.empty:
+        print("Warning: Empty RWIS DataFrame")
         return pd.DataFrame()
     
-    # Check for required columns
-    required_rwis_cols = ["lat", "lon"]
-    required_cotrip_cols = ["lat", "lon", "properties.lastUpdated"]
+    # Initialize the current time for recency checks
+    current_time = datetime.now(timezone.utc)
+    recent_cutoff = current_time - timedelta(minutes=RECENT_MIN)
     
-    missing_rwis = [col for col in required_rwis_cols if col not in rwis_pts.columns]
-    missing_cotrip = [col for col in required_cotrip_cols if col not in cotrip.columns]
+    # Create base structure for all selected stations with NaN sensor data
+    all_station_records = []
     
-    if missing_rwis:
-        print(f"Missing RWIS columns: {missing_rwis}")
-        return pd.DataFrame()
-    if missing_cotrip:
-        print(f"Missing CoTrip columns: {missing_cotrip}")
-        return pd.DataFrame()
+    # Process CoTrip data if available
+    valid_cotrip_data = {}
+    if not cotrip.empty and "properties.name" in cotrip.columns and "properties.lastUpdated" in cotrip.columns:
+        # Clean CoTrip data
+        cotrip_clean = cotrip.dropna(subset=["lat", "lon", "properties.lastUpdated"]).copy()
+        
+        if not cotrip_clean.empty:
+            # Extract station codes and filter for selected stations
+            cotrip_clean['station_code'] = cotrip_clean["properties.name"].apply(extract_station_code)
+            cotrip_selected = cotrip_clean[cotrip_clean['station_code'].isin(SELECTED_STATIONS)].copy()
+            
+            print(f"Found {len(cotrip_selected)} selected stations in CoTrip data")
+            
+            # Check recency and store valid data
+            for _, row in cotrip_selected.iterrows():
+                station_code = row['station_code']
+                last_updated = pd.to_datetime(row['properties.lastUpdated'], utc=True)
+                
+                is_recent = last_updated >= recent_cutoff
+                if is_recent:
+                    valid_cotrip_data[station_code] = row
+                    print(f"Station {station_code}: Recent data ({last_updated.strftime('%H:%M')})")
+                else:
+                    minutes_old = (current_time - last_updated).total_seconds() / 60
+                    print(f"Station {station_code}: Stale data ({minutes_old:.1f} min old) - will use NaN")
     
-    # Remove rows with NaN coordinates
-    rwis_clean = rwis_pts.dropna(subset=["lat", "lon"]).copy()
-    cotrip_clean = cotrip.dropna(subset=["lat", "lon", "properties.lastUpdated"]).copy()
+    # Create records for ALL selected stations
+    for station_code in SELECTED_STATIONS:
+        # Start with NaN values for all sensor data
+        base_record = {
+            'properties.name': f"{station_code} [Generated Record]",
+            'station_code': station_code,
+            'lat': np.nan,
+            'lon': np.nan,
+            'geometry.srid': np.nan,
+            'properties.lastUpdated': current_time,
+            'properties.direction': np.nan,
+            # Sensor data - all NaN by default
+            'visibility': np.nan,
+            'min temperature': np.nan,
+            'dew point': np.nan,
+            'gust wind speed': np.nan,
+            'max temperature': np.nan,
+            'temperature': np.nan,
+            'average wind speed': np.nan,
+            'road surface friction index': np.nan,
+            'humidity': np.nan,
+        }
+        
+        # If we have valid recent data for this station, use it
+        if station_code in valid_cotrip_data:
+            cotrip_row = valid_cotrip_data[station_code]
+            # Update record with actual CoTrip data
+            for col in cotrip_row.index:
+                if col in base_record:
+                    base_record[col] = cotrip_row[col]
+            print(f"Station {station_code}: Using real sensor data")
+        else:
+            print(f"Station {station_code}: Using NaN values (no recent data)")
+        
+        all_station_records.append(base_record)
     
-    if rwis_clean.empty or cotrip_clean.empty:
-        print("Warning: No valid coordinates after cleaning")
-        return pd.DataFrame()
+    # Convert to DataFrame
+    result_df = pd.DataFrame(all_station_records)
     
-    rwis_xy = rwis_clean[["lat", "lon"]].to_numpy()
-    cotrip_xy = cotrip_clean[["lat", "lon"]].to_numpy()
-
-    tree = cKDTree(rwis_xy)
-    dist, idx = tree.query(cotrip_xy, distance_upper_bound=PAIR_TOLERANCE_DEG)
-
-    # Safe timestamp filtering
-    try:
-        recent_cut = cotrip_clean["properties.lastUpdated"].max() - timedelta(minutes=RECENT_MIN)
-        mask = (dist != np.inf) & (cotrip_clean["properties.lastUpdated"] >= recent_cut)
-    except Exception as e:
-        print(f"Error in timestamp filtering: {e}")
-        mask = dist != np.inf
-
-    rwis_match = pd.DataFrame(index=cotrip_clean.index, columns=rwis_clean.columns)
-    valid_matches = dist != np.inf
-    if valid_matches.any():
-        rwis_match.loc[valid_matches] = rwis_clean.iloc[idx[valid_matches]].values
-
-    combined = pd.concat([cotrip_clean.reset_index(drop=True), rwis_match.add_prefix("rwis_")], axis=1)
-
+    # Now pair with RWIS data for meteorological interpolation
+    if not rwis_pts.empty:
+        # Only pair stations that have valid coordinates
+        coords_available = result_df.dropna(subset=['lat', 'lon'])
+        
+        if not coords_available.empty:
+            rwis_clean = rwis_pts.dropna(subset=["lat", "lon"]).copy()
+            
+            if not rwis_clean.empty:
+                rwis_xy = rwis_clean[["lat", "lon"]].to_numpy()
+                coords_xy = coords_available[["lat", "lon"]].to_numpy()
+                
+                tree = cKDTree(rwis_xy)
+                dist, idx = tree.query(coords_xy, distance_upper_bound=PAIR_TOLERANCE_DEG)
+                
+                # Create RWIS matches
+                rwis_match = pd.DataFrame(index=coords_available.index, columns=rwis_clean.columns)
+                valid_matches = dist != np.inf
+                
+                if valid_matches.any():
+                    matched_indices = coords_available.index[valid_matches]
+                    rwis_match.loc[matched_indices] = rwis_clean.iloc[idx[valid_matches]].values
+                
+                # Add RWIS data to result
+                for col in rwis_match.columns:
+                    result_df[f"rwis_{col}"] = rwis_match[col]
+    
     # Drop unwanted columns
-    drop = [
-        "precipitation accumulation 12hr",
-        "precipitation accumulation 1hr",
-        "precipitation accumulation 24hr",
-        "precipitation accumulation 3hr",
-        "precipitation accumulation 6hr",
-        "precipitation end time",
-        "precipitation present",
-        "precipitation rate",
-        "precipitation situation",
-        "precipitation start time",
-        "geometry.type",
-        "properties.nativeId",
-        "road surface salinity",
-        "road subsurface sensor error",
-        "road subsurface temperature",
+    drop_cols = [
+        "precipitation accumulation 12hr", "precipitation accumulation 1hr",
+        "precipitation accumulation 24hr", "precipitation accumulation 3hr",
+        "precipitation accumulation 6hr", "precipitation end time",
+        "precipitation present", "precipitation rate", "precipitation situation",
+        "precipitation start time", "geometry.type", "properties.nativeId",
+        "road surface salinity", "road subsurface sensor error",
+        "road subsurface temperature", "station_code"
     ]
-    combined = combined.drop(columns=[c for c in drop if c in combined.columns])
-
-    result = combined[mask].reset_index(drop=True)
-    print(f"Paired {len(result)} stations successfully")
+    result_df = result_df.drop(columns=[c for c in drop_cols if c in result_df.columns])
+    
+    # Add valid_time from RWIS if available
     if "valid_time" in rwis_pts.columns:
-        result["valid_time"] = rwis_pts["valid_time"].iloc[0]
-    return result
+        result_df["valid_time"] = rwis_pts["valid_time"].iloc[0]
+    else:
+        result_df["valid_time"] = current_time
+    
+    # Summary statistics
+    stations_with_data = sum(1 for code in SELECTED_STATIONS if code in valid_cotrip_data)
+    stations_with_nan = len(SELECTED_STATIONS) - stations_with_data
+    
+    print(f"Final result: {len(result_df)} station records created")
+    print(f"  - {stations_with_data} stations with recent sensor data")
+    print(f"  - {stations_with_nan} stations with NaN sensor data (stale/missing)")
+    
+    return result_df
 
 
 def build_snapshot(api_key: str) -> xr.Dataset:
@@ -524,3 +599,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
