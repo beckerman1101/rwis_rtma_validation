@@ -264,6 +264,7 @@ def fetch_cotrip(api_key: str) -> pd.DataFrame:
 
 # Add this constant near the top with your other configuration constants
 # Add this constant near the top with your other configuration constants
+# Add this constant near the top with your other configuration constants
 SELECTED_STATIONS = {
     'W206', 'W209', 'W253', 'W224', 'W199', 'W195', 'W211',
     'E171', 'E238', 'E237', 'E227', 'E235', 'E216', 'E234', 
@@ -345,9 +346,9 @@ def pair_and_merge(rwis_pts: pd.DataFrame, cotrip: pd.DataFrame) -> pd.DataFrame
         # If we have valid recent data for this station, use it
         if station_code in valid_cotrip_data:
             cotrip_row = valid_cotrip_data[station_code]
-            # Update record with actual CoTrip data
+            # Update record with actual CoTrip data (but keep the station_code)
             for col in cotrip_row.index:
-                if col in base_record:
+                if col in base_record and col != 'station_code':  # Don't overwrite our clean station_code
                     base_record[col] = cotrip_row[col]
             print(f"Station {station_code}: Using real sensor data")
         else:
@@ -355,8 +356,17 @@ def pair_and_merge(rwis_pts: pd.DataFrame, cotrip: pd.DataFrame) -> pd.DataFrame
         
         all_station_records.append(base_record)
     
+    print(f"DEBUG: Created {len(all_station_records)} station records")
+    
     # Convert to DataFrame
     result_df = pd.DataFrame(all_station_records)
+    
+    # Verify no duplicate station codes
+    if result_df['station_code'].duplicated().any():
+        print("ERROR: Duplicate station codes found in generated records!")
+        print(result_df['station_code'].value_counts())
+        # This should never happen, but if it does, make them unique
+        result_df['station_code'] = result_df['station_code'] + '_' + result_df.index.astype(str)
     
     # Now pair with RWIS data for meteorological interpolation
     if not rwis_pts.empty:
@@ -602,6 +612,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
