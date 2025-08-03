@@ -174,6 +174,13 @@ SELECTED_STATIONS = {
     'E234', 'E240', 'E213', 'E232', 'W221'
 }
 
+# Add this constant near the top with your other configuration constants
+SELECTED_STATIONS = {
+    'W206', 'W209', 'W253', 'W224', 'W199', 'W195', 'W211',
+    'E171', 'E238', 'E237', 'E227', 'E235', 'E216', 'E234', 
+    'E240', 'E213', 'E232'
+}
+
 def extract_station_code(station_name):
     """Extract 4-character station code (direction + 3 digits) from station name."""
     import re
@@ -230,6 +237,7 @@ def fetch_cotrip(api_key: str) -> pd.DataFrame:
         recent_cutoff = current_time - timedelta(minutes=RECENT_MIN)
         
         if "properties.lastUpdated" in df.columns:
+            # Ensure timestamps are UTC timezone-aware
             df["properties.lastUpdated"] = pd.to_datetime(df["properties.lastUpdated"], utc=True, errors="coerce")
             
             # Show recency status for each station
@@ -433,7 +441,8 @@ def build_snapshot(api_key: str) -> xr.Dataset:
 
     grib, snapshot_time = download_rtma_grib()
     rtma_df = interpolate_rtma_to_points(grib, rwis_meta)
-    rtma_df["valid_time"] = pd.to_datetime(snapshot_time)
+    # Ensure RTMA timestamp is UTC timezone-aware
+    rtma_df["valid_time"] = pd.to_datetime(snapshot_time, utc=True)
     print(f"Interpolated RTMA to {len(rtma_df)} stations")
 
     cotrip_df = fetch_cotrip(api_key)
@@ -460,15 +469,34 @@ def build_snapshot(api_key: str) -> xr.Dataset:
     # Ensure station IDs are strings
     merged_df[station_id_col] = merged_df[station_id_col].astype(str)
     
-    # Fix timezone handling for valid_time
+    # Fix timezone handling for valid_time - ensure everything is UTC
     if "valid_time" in merged_df.columns:
-        # Check if already timezone-aware
-        if merged_df["valid_time"].dt.tz is not None:
-            # Already timezone-aware, convert to naive
-            merged_df["valid_time"] = merged_df["valid_time"].dt.tz_convert(None)
+        print(f"DEBUG: valid_time dtype: {merged_df['valid_time'].dtype}")
+        print(f"DEBUG: valid_time tz: {getattr(merged_df['valid_time'].dt, 'tz', 'No tz attribute')}")
+        
+        # Convert to UTC timezone-aware first, then to naive
+        if merged_df["valid_time"].dt.tz is None:
+            # Timezone-naive - assume UTC and localize
+            print("Converting timezone-naive timestamps to UTC")
+            merged_df["valid_time"] = merged_df["valid_time"].dt.tz_localize('UTC')
         else:
-            # Already timezone-naive, ensure it's datetime
-            merged_df["valid_time"] = pd.to_datetime(merged_df["valid_time"])
+            # Already timezone-aware - convert to UTC if not already
+            print(f"Converting timezone-aware timestamps from {merged_df['valid_time'].dt.tz} to UTC")
+            merged_df["valid_time"] = merged_df["valid_time"].dt.tz_convert('UTC')
+        
+        # Now convert to timezone-naive UTC for NetCDF compatibility
+        merged_df["valid_time"] = merged_df["valid_time"].dt.tz_convert(None)
+        print(f"Final valid_time dtype: {merged_df['valid_time'].dtype}")
+    
+    # Also handle properties.lastUpdated if it exists
+    if "properties.lastUpdated" in merged_df.columns:
+        print(f"DEBUG: properties.lastUpdated dtype: {merged_df['properties.lastUpdated'].dtype}")
+        if merged_df["properties.lastUpdated"].dt.tz is None:
+            # Assume UTC and localize, then convert back to naive
+            merged_df["properties.lastUpdated"] = merged_df["properties.lastUpdated"].dt.tz_localize('UTC').dt.tz_convert(None)
+        else:
+            # Convert to UTC then to naive
+            merged_df["properties.lastUpdated"] = merged_df["properties.lastUpdated"].dt.tz_convert('UTC').dt.tz_convert(None)
     
     print(f"Using station ID column: {station_id_col}")
     print(f"Station IDs: {sorted(merged_df[station_id_col].unique())}")
@@ -620,5 +648,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
