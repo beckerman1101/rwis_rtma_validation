@@ -175,12 +175,6 @@ SELECTED_STATIONS = {
 }
 
 # Add this constant near the top with your other configuration constants
-SELECTED_STATIONS = {
-    'W206', 'W209', 'W253', 'W224', 'W199', 'W195', 'W211',
-    'E171', 'E238', 'E237', 'E227', 'E235', 'E216', 'E234', 
-    'E240', 'E213', 'E232'
-}
-
 def extract_station_code(station_name):
     """Extract 4-character station code (direction + 3 digits) from station name."""
     import re
@@ -533,9 +527,15 @@ def append_daily(ds: xr.Dataset) -> None:
     # Ensure 'valid_time' is a coordinate
     if "valid_time" in ds.coords:
     # Convert to numpy datetime64 without timezone
-        times = pd.to_datetime(ds["valid_time"].values).tz_convert(None).to_numpy()
-        times = pd.to_datetime(ds["valid_time"].values).tz_localize(None).to_numpy()
+        times = pd.to_datetime(ds["valid_time"].values)
+
+        if times.tz is not None:
+            times = times.tz_convert(None)
+        else:
+            times = times.tz_localize(None)
+
         ds = ds.assign_coords(valid_time=times)
+
 
     elif "valid_time" in ds.dims:
     # If it's a dimension only
@@ -648,6 +648,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
