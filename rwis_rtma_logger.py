@@ -263,12 +263,6 @@ def fetch_cotrip(api_key: str) -> pd.DataFrame:
 
 
 # Add this constant near the top with your other configuration constants
-SELECTED_STATIONS = {
-    'W206', 'W209', 'W253', 'W224', 'W199', 'W195', 'W211',
-    'E171', 'E238', 'E237', 'E227', 'E235', 'E216', 'E234', 
-    'E240', 'E213', 'E232'
-}
-
 # Add this constant near the top with your other configuration constants
 SELECTED_STATIONS = {
     'W206', 'W209', 'W253', 'W224', 'W199', 'W195', 'W211',
@@ -390,6 +384,9 @@ def pair_and_merge(rwis_pts: pd.DataFrame, cotrip: pd.DataFrame) -> pd.DataFrame
                 # Add RWIS data to result
                 for col in rwis_match.columns:
                     result_df[f"rwis_{col}"] = rwis_match[col]
+    
+    # Extract station codes for the final station_id before dropping
+    result_df['extracted_station_id'] = result_df['station_code'].copy()
     
     # Drop unwanted columns
     drop_cols = [
@@ -605,5 +602,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
