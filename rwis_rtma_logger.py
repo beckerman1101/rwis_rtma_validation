@@ -269,6 +269,13 @@ SELECTED_STATIONS = {
     'E240', 'E213', 'E232'
 }
 
+# Add this constant near the top with your other configuration constants
+SELECTED_STATIONS = {
+    'W206', 'W209', 'W253', 'W224', 'W199', 'W195', 'W211',
+    'E171', 'E238', 'E237', 'E227', 'E235', 'E216', 'E234', 
+    'E240', 'E213', 'E232'
+}
+
 def extract_station_code(station_name):
     """Extract 4-character station code (direction + 3 digits) from station name."""
     import re
@@ -411,7 +418,6 @@ def pair_and_merge(rwis_pts: pd.DataFrame, cotrip: pd.DataFrame) -> pd.DataFrame
     print(f"  - {stations_with_nan} stations with NaN sensor data (stale/missing)")
     
     return result_df
-
 
 def build_snapshot(api_key: str) -> xr.Dataset:
     """Full pipeline: RWIS meta → RTMA interp → CoTrip merge → xarray.Dataset."""
@@ -599,4 +605,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
