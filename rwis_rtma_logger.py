@@ -169,9 +169,9 @@ def interpolate_rtma_to_points(grib_file: str, rwis: pd.DataFrame) -> pd.DataFra
 
 # Add this constant near the top with your other configuration constants
 SELECTED_STATIONS = {
-    'W206', 'W209', 'W253', 'W224', 'W199', 'W195', 'W211',
-    'E171', 'E238', 'E237', 'E227', 'E235', 'E216', 'E234', 
-    'E240', 'E213', 'E232'
+    'W206', 'W224', 'W199', 'W195', 'W211',
+    'E171', 'E238', 'E237', 'E227', 'E235', 
+    'E234', 'E240', 'E213', 'E232', 'W221'
 }
 
 def extract_station_code(station_name):
@@ -421,6 +421,7 @@ def pair_and_merge(rwis_pts: pd.DataFrame, cotrip: pd.DataFrame) -> pd.DataFrame
 
     return combined
 
+
 def build_snapshot(api_key: str) -> xr.Dataset:
     """Full pipeline: RWIS meta → RTMA interp → CoTrip merge → xarray.Dataset."""
     # Check if metadata file exists
@@ -443,10 +444,9 @@ def build_snapshot(api_key: str) -> xr.Dataset:
     if merged_df.empty:
         raise ValueError("Merged dataframe is empty — no data to log.")
 
-    # Add UTC time as datetime (not string)
     # Ensure we have a valid station ID column
     station_id_col = None
-    for col in ["rwis_station_id", "station_id", "rwis_stid"]:
+    for col in ["station_code", "rwis_station_id", "station_id", "rwis_stid"]:
         if col in merged_df.columns:
             station_id_col = col
             break
@@ -459,13 +459,24 @@ def build_snapshot(api_key: str) -> xr.Dataset:
 
     # Ensure station IDs are strings
     merged_df[station_id_col] = merged_df[station_id_col].astype(str)
-    # Ensure valid_time is timezone-naive (required for NetCDF)
+    
+    # Fix timezone handling for valid_time
     if "valid_time" in merged_df.columns:
-        merged_df["valid_time"] = pd.to_datetime(merged_df["valid_time"], utc=True).dt.tz_convert(None)
+        # Check if already timezone-aware
+        if merged_df["valid_time"].dt.tz is not None:
+            # Already timezone-aware, convert to naive
+            merged_df["valid_time"] = merged_df["valid_time"].dt.tz_convert(None)
+        else:
+            # Already timezone-naive, ensure it's datetime
+            merged_df["valid_time"] = pd.to_datetime(merged_df["valid_time"])
+    
+    print(f"Using station ID column: {station_id_col}")
+    print(f"Station IDs: {sorted(merged_df[station_id_col].unique())}")
 
     # Set time + station ID as index for dimensions
     merged_df = merged_df.set_index(["valid_time", station_id_col])
-    merged_df.sort_values("valid_time")
+    merged_df = merged_df.sort_index()
+    
     # Convert to xarray Dataset
     ds = xr.Dataset.from_dataframe(merged_df)
 
@@ -609,4 +620,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
