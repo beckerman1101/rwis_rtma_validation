@@ -171,8 +171,7 @@ def interpolate_rtma_to_points(grib_file: str, rwis: pd.DataFrame) -> pd.DataFra
 SELECTED_STATIONS = {
     'W206', 'W224', 'W199', 'W195', 'W211',
     'E171', 'E238', 'E237', 'E227', 'E235', 
-    'E234', 'E240', 'E213', 'E232', 'W221',
-    'E216'
+    'E234', 'E240', 'E213', 'E232', 'W221'
 }
 
 # Add this constant near the top with your other configuration constants
@@ -649,6 +648,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
