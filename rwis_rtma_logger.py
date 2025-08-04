@@ -379,6 +379,7 @@ def build_snapshot(api_key: str) -> xr.Dataset:
         raise ValueError("Merged dataframe is empty — no data to log.")
 
     # Ensure we have a valid station ID column
+    # Ensure we have a valid station ID column
     station_id_col = None
     for col in ["station_code", "rwis_station_id", "station_id", "rwis_stid"]:
         if col in merged_df.columns:
@@ -391,47 +392,54 @@ def build_snapshot(api_key: str) -> xr.Dataset:
         station_id_col = "station_index"
         merged_df[station_id_col] = merged_df[station_id_col].astype(str)
 
-    # Ensure station IDs are strings
+# Ensure station IDs are strings
     merged_df[station_id_col] = merged_df[station_id_col].astype(str)
 
+# Drop rows with missing or invalid station ID
+    merged_df = merged_df.dropna(subset=[station_id_col])
+    merged_df = merged_df[merged_df[station_id_col].str.lower() != "nan"]
+
+# Drop duplicate time/station pairs
+    merged_df = merged_df.drop_duplicates(subset=["valid_time", station_id_col])
+
+# Fix timezone handling for valid_time - ensure everything is UTC
     # Fix timezone handling for valid_time - ensure everything is UTC
     if "valid_time" in merged_df.columns:
         print(f"DEBUG: valid_time dtype: {merged_df['valid_time'].dtype}")
         print(f"DEBUG: valid_time tz: {getattr(merged_df['valid_time'].dt, 'tz', 'No tz attribute')}")
 
-        # Convert to UTC timezone-aware first, then to naive
+    # Convert to UTC timezone-aware first, then to naive
         if merged_df["valid_time"].dt.tz is None:
-            # Timezone-naive - assume UTC and localize
+        # Timezone-naive - assume UTC and localize
             print("Converting timezone-naive timestamps to UTC")
             merged_df["valid_time"] = merged_df["valid_time"].dt.tz_localize('UTC')
         else:
-            # Already timezone-aware - convert to UTC if not already
+        # Already timezone-aware - convert to UTC if not already
             print(f"Converting timezone-aware timestamps from {merged_df['valid_time'].dt.tz} to UTC")
             merged_df["valid_time"] = merged_df["valid_time"].dt.tz_convert('UTC')
 
-        # Now convert to timezone-naive UTC for NetCDF compatibility
+    # Now convert to timezone-naive UTC for NetCDF compatibility
         merged_df["valid_time"] = merged_df["valid_time"].dt.tz_convert(None)
         print(f"Final valid_time dtype: {merged_df['valid_time'].dtype}")
 
-    # Also handle properties.lastUpdated if it exists
+# Also handle properties.lastUpdated if it exists
     if "properties.lastUpdated" in merged_df.columns:
         print(f"DEBUG: properties.lastUpdated dtype: {merged_df['properties.lastUpdated'].dtype}")
         if merged_df["properties.lastUpdated"].dt.tz is None:
-            # Assume UTC and localize, then convert back to naive
+        # Assume UTC and localize, then convert back to naive
             merged_df["properties.lastUpdated"] = merged_df["properties.lastUpdated"].dt.tz_localize('UTC').dt.tz_convert(None)
         else:
-            # Convert to UTC then to naive
+        # Convert to UTC then to naive
             merged_df["properties.lastUpdated"] = merged_df["properties.lastUpdated"].dt.tz_convert('UTC').dt.tz_convert(None)
 
-    print(f"Using station ID column: {station_id_col}")
-    print(f"Station IDs: {sorted(merged_df[station_id_col].unique())}")
 
-    # Set time + station ID as index for dimensions
+# Set time + station ID as index for dimensions
     merged_df = merged_df.set_index(["valid_time", station_id_col])
     merged_df = merged_df.sort_index()
 
-    # Convert to xarray Dataset
+# Convert to xarray Dataset
     ds = xr.Dataset.from_dataframe(merged_df)
+
 
     # Promote useful metadata as coordinates if they exist
     coord_mappings = {
@@ -579,5 +587,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
