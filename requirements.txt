@@ -5,3 +5,4 @@ cfgrib
 eccodes           # runtime lib for cfgrib
 requests
 scipy
+netcdf4
