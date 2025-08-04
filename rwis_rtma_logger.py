@@ -556,45 +556,107 @@ def append_daily(ds: xr.Dataset) -> None:
     if "valid_time" not in ds.dims and "valid_time" not in ds.coords:
         raise ValueError("Dataset has no 'time' dimension or coordinate.")
 
-    # Ensure time is datetime, not string
-    # Ensure 'valid_time' is a coordinate
-    if "valid_time" in ds.coords:
-    # Convert to numpy datetime64 without timezone
-        times = pd.to_datetime(ds["valid_time"].values)
-
-        if times.tz is not None:
-            times = times.tz_convert(None)
+    # Clean up problematic datetime fields BEFORE encoding
+    print("Cleaning up datetime fields...")
+    
+    # Handle properties.lastUpdated - remove if it has invalid values
+    if "properties.lastUpdated" in ds.data_vars:
+        # Check for invalid timestamp values
+        last_updated_values = ds["properties.lastUpdated"].values
+        if np.any(last_updated_values < 0) or np.any(np.isnan(last_updated_values.astype(float))):
+            print("Found invalid timestamps in properties.lastUpdated, removing this variable")
+            ds = ds.drop_vars("properties.lastUpdated")
         else:
-            times = times.tz_localize(None)
+            # Convert to string to avoid datetime encoding issues
+            print("Converting properties.lastUpdated to string representation")
+            ds["properties.lastUpdated"] = ds["properties.lastUpdated"].astype(str)
 
+    # Ensure 'valid_time' is properly handled
+    if "valid_time" in ds.coords:
+        # Convert to numpy datetime64 without timezone
+        times = pd.to_datetime(ds["valid_time"].values)
+        if hasattr(times, 'tz') and times.tz is not None:
+            times = times.tz_convert(None)
         ds = ds.assign_coords(valid_time=times)
-
-
     elif "valid_time" in ds.dims:
-    # If it's a dimension only
-        ds["valid_time"] = ds["valid_time"].dt.tz_convert(None)
-        ds["valid_time"] = ds["valid_time"].dt.tz_localize(None)
+        # If it's a dimension only, ensure it's timezone-naive
+        if hasattr(ds["valid_time"].values, 'dt'):
+            ds["valid_time"] = ds["valid_time"].dt.tz_convert(None)
 
-# Also assign to 'time' coordinate
+    # Also assign to 'time' coordinate for consistency
     ds = ds.assign_coords(time=ds["valid_time"])
 
-
     fname = f"rwis_rtma_{pd.Timestamp.utcnow():%Y%m%d}.nc"
+
+    # Prepare encoding dictionary for all datetime-related variables
+    encoding = {}
+    
+    # Handle time coordinates with explicit encoding
+    time_vars = ['time', 'valid_time']
+    for time_var in time_vars:
+        if time_var in ds.coords or time_var in ds.data_vars:
+            encoding[time_var] = {
+                'units': 'seconds since 1970-01-01T00:00:00',
+                'dtype': 'float64',  # Use float64 for time to avoid casting issues
+                'calendar': 'proleptic_gregorian'
+            }
+
+    # Handle string variables
+    for var in ds.data_vars:
+        if ds[var].dtype == 'object':
+            if ds[var].size > 0:
+                sample_val = ds[var].values.flat[0] if ds[var].values.size > 0 else ""
+                if isinstance(sample_val, str) or sample_val is None:
+                    encoding[var] = {'dtype': 'U64'}  # Unicode string
+                else:
+                    # Convert to string if it's not already
+                    ds[var] = ds[var].astype(str)
+                    encoding[var] = {'dtype': 'U64'}
+
+    # Handle coordinate variables
+    for coord in ds.coords:
+        if coord not in encoding and ds[coord].dtype == 'object':
+            if ds[coord].size > 0:
+                sample_val = ds[coord].values.flat[0] if ds[coord].values.size > 0 else ""
+                if isinstance(sample_val, str) or sample_val is None:
+                    encoding[coord] = {'dtype': 'U64'}
+                else:
+                    # Convert to string if it's not already
+                    ds = ds.assign_coords({coord: ds[coord].astype(str)})
+                    encoding[coord] = {'dtype': 'U64'}
 
     if os.path.exists(fname):
         try:
             with xr.open_dataset(fname) as existing:
+                # Ensure coordinate compatibility before combining
+                print("Aligning coordinates between existing and new datasets...")
+                
+                # Drop problematic variables from existing dataset if they exist
+                vars_to_drop = []
+                for var in existing.data_vars:
+                    if var not in ds.data_vars:
+                        print(f"Dropping variable {var} from existing dataset (not in new data)")
+                        vars_to_drop.append(var)
+                
+                if vars_to_drop:
+                    existing = existing.drop_vars(vars_to_drop)
+                
+                # Ensure both datasets have the same coordinate structure
+                # Make sure 'time' coordinate exists in both
+                if 'time' not in existing.coords and 'valid_time' in existing.coords:
+                    existing = existing.assign_coords(time=existing['valid_time'])
+                
                 # Combine datasets
                 combined = xr.concat([existing, ds], dim="valid_time")
 
-                # CRITICAL FIX: Sort by time to ensure chronological order
+                # Sort by time to ensure chronological order
                 combined = combined.sortby("valid_time")
 
-                # Optional: Remove duplicate timestamps if they exist
+                # Remove duplicate timestamps if they exist
                 _, unique_indices = np.unique(combined.valid_time.values, return_index=True)
                 if len(unique_indices) < len(combined.valid_time):
                     print(f"Removing {len(combined.valid_time) - len(unique_indices)} duplicate timestamps")
-                    combined = combined.isel(time=unique_indices)
+                    combined = combined.isel(valid_time=unique_indices)
 
                 ds = combined.sortby("valid_time")
                 print(f"Appended to existing file: {fname}")
@@ -606,63 +668,34 @@ def append_daily(ds: xr.Dataset) -> None:
     else:
         print(f"Creating new daily file: {fname}")
 
-    # Improved encoding - handle different data types properly
-    encoding = {}
-
-    # Process data variables
-    for var in ds.data_vars:
-        if ds[var].dtype == 'object':
-            # Check if it's actually string data or datetime
-            if ds[var].size > 0:
-                sample_val = ds[var].values.flat[0]
-                if isinstance(sample_val, str):
-                    encoding[var] = {'dtype': 'U64'}  # Unicode string
-                elif isinstance(sample_val, pd.Timestamp) or hasattr(sample_val, 'strftime'):
-                    # Convert datetime to string for NetCDF storage
-                    ds[var] = ds[var].astype(str)
-                    encoding[var] = {'dtype': 'U32'}  # Datetime as string
-                elif pd.isna(sample_val):
-                    # Handle NaN values - convert to string
-                    ds[var] = ds[var].astype(str)
-                    encoding[var] = {'dtype': 'U32'}
-
-    # Process coordinate variables
-    for coord in ds.coords:
-        if ds[coord].dtype == 'object':
-            if ds[coord].size > 0:
-                sample_val = ds[coord].values.flat[0]
-                if isinstance(sample_val, str):
-                    encoding[coord] = {'dtype': 'U64'}
-                elif isinstance(sample_val, pd.Timestamp) or hasattr(sample_val, 'strftime'):
-                    # Convert datetime to string for NetCDF storage
-                    ds = ds.assign_coords({coord: ds[coord].astype(str)})
-                    encoding[coord] = {'dtype': 'U32'}
-                elif pd.isna(sample_val):
-                    # Handle NaN values - convert to string
-                    ds = ds.assign_coords({coord: ds[coord].astype(str)})
-                    encoding[coord] = {'dtype': 'U32'}
-
-    # Use netCDF4 backend for compression support, fallback to scipy without compression
+    # Save with proper encoding
+    print(f"Saving dataset with encoding: {list(encoding.keys())}")
+    
     try:
-        # Try netCDF4 backend with compression
-        for var in ds.data_vars:
-            if var not in encoding:
-                encoding[var] = {}
-            encoding[var].update({'zlib': True, 'complevel': 4})
-
-        ds.to_netcdf(fname, mode="w", encoding=encoding, engine='netcdf4')
-        print(f"Saved with netCDF4 backend and compression")
-    except (ImportError, ValueError) as e:
-        # Fallback to scipy backend without compression
-        print(f"NetCDF4 not available, using scipy backend: {e}")
-        # Remove compression from encoding
-        for var in encoding:
-            if isinstance(encoding[var], dict):
-                encoding[var].pop('zlib', None)
-                encoding[var].pop('complevel', None)
-
-        ds.to_netcdf(fname, mode="w", encoding=encoding)
-    print(f"Saved to: {fname}")
+        # Always use scipy backend to avoid netCDF4 dependency issues
+        ds.to_netcdf(fname, mode="w", encoding=encoding, engine='scipy')
+        print(f"Successfully saved to: {fname}")
+    except Exception as e:
+        print(f"Error saving with scipy backend: {e}")
+        
+        # Last resort: try without any encoding
+        try:
+            print("Attempting to save without custom encoding...")
+            # Drop any remaining problematic variables
+            safe_ds = ds.copy()
+            for var in list(safe_ds.data_vars):
+                if safe_ds[var].dtype == 'object':
+                    try:
+                        safe_ds[var] = safe_ds[var].astype(str)
+                    except:
+                        print(f"Dropping problematic variable: {var}")
+                        safe_ds = safe_ds.drop_vars(var)
+            
+            safe_ds.to_netcdf(fname, mode="w", engine='scipy')
+            print(f"Saved simplified dataset to: {fname}")
+        except Exception as final_e:
+            print(f"Final save attempt failed: {final_e}")
+            raise
 
 
 def main() -> None:
@@ -681,6 +714,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
