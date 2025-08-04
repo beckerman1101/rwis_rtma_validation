@@ -168,7 +168,26 @@ def interpolate_rtma_to_points(grib_file: str, rwis: pd.DataFrame) -> pd.DataFra
 
 
 # Add this constant near the top with your other configuration constants
+SELECTED_STATIONS = {
+    'W206', 'W224', 'W199', 'W195', 'W211',
+    'E171', 'E238', 'E237', 'E227', 'E235', 
+    'E234', 'E240', 'E213', 'E232', 'W221'
+}
+
+# Add this constant near the top with your other configuration constants
+def extract_station_code(station_name):
+    """Extract 4-character station code (direction + 3 digits) from station name."""
+    import re
+    if not isinstance(station_name, str):
+        return None
+    
+    # Look for pattern: E/W followed by 3 digits
+    match = re.search(r'[EW]\d{3}', station_name.upper())
+    return match.group(0) if match else None
+
+
 def fetch_cotrip(api_key: str) -> pd.DataFrame:
+    """Download CoTrip JSON, filter for selected stations, and apply 20-minute recency filter."""
     """Download CoTrip JSON, include all stations but mark stale data with NaNs."""
     try:
         r = requests.get(f"{COTRIP_URL}?apiKey={api_key}", timeout=60)
@@ -190,39 +209,78 @@ def fetch_cotrip(api_key: str) -> pd.DataFrame:
             print("Warning: No sensor data in CoTrip response")
             return pd.DataFrame()
 
-        # Process all stations - no filtering needed
-        print(f"Processing {len(df)} total stations from CoTrip")
+        # FIRST: Filter for selected stations only
+        # Extract station codes for all stations (no filtering by SELECTED_STATIONS)
+        if "properties.name" in df.columns:
+            # Extract station codes and filter
+            df['station_code'] = df["properties.name"].apply(extract_station_code)
+            
+            before_filter = len(df)
+            df = df[df['station_code'].isin(SELECTED_STATIONS)].copy()
+            after_filter = len(df)
+            
+            print(f"Station filtering: {before_filter} -> {after_filter} stations")
+            # Remove stations without valid station codes
+            df = df.dropna(subset=['station_code']).copy()
 
+            if df.empty:
+                print("Warning: No selected stations found in CoTrip data")
+                print("Warning: No stations with valid station codes found")
+                return pd.DataFrame()
+                
+            print(f"Processing {len(df)} total stations from CoTrip")
+        else:
+            print("Warning: No 'properties.name' column for station filtering")
+            print("Warning: No 'properties.name' column for station identification")
+            return pd.DataFrame()
+
+        # SECOND: Apply 20-minute recency filter
         # Apply recency check but don't filter out - mark stale data instead
         current_time = datetime.now(timezone.utc)
         recent_cutoff = current_time - timedelta(minutes=RECENT_MIN)
-        
+
         recent_stations = []
         stale_stations = []
         
         if "properties.lastUpdated" in df.columns:
             # Ensure timestamps are UTC timezone-aware
             df["properties.lastUpdated"] = pd.to_datetime(df["properties.lastUpdated"], utc=True, errors="coerce")
-            
+
+            # Show recency status for each station
             # Categorize stations by data recency
             for _, row in df.iterrows():
-                station_name = row.get('properties.name', f'Station_{row.name}')
+                station_code = row['station_code']
                 last_updated = row['properties.lastUpdated']
-                
+
                 if pd.isna(last_updated):
-                    print(f"Station {station_name}: No timestamp - treating as stale")
-                    stale_stations.append(station_name)
+                    print(f"Station {station_code}: No timestamp - will be filtered out")
+                    print(f"Station {station_code}: No timestamp - treating as stale")
+                    stale_stations.append(station_code)
                 else:
                     minutes_old = (current_time - last_updated).total_seconds() / 60
                     if minutes_old <= RECENT_MIN:
-                        print(f"Station {station_name}: Recent data ({minutes_old:.1f} min old)")
-                        recent_stations.append(station_name)
+                        print(f"Station {station_code}: Recent data ({minutes_old:.1f} min old)")
+                        recent_stations.append(station_code)
                     else:
-                        print(f"Station {station_name}: Stale data ({minutes_old:.1f} min old) - will use NaNs")
-                        stale_stations.append(station_name)
+                        print(f"Station {station_code}: Stale data ({minutes_old:.1f} min old) - will be filtered out")
+                        print(f"Station {station_code}: Stale data ({minutes_old:.1f} min old) - will use NaNs")
+                        stale_stations.append(station_code)
+
+            # Apply recency filter
+            before_recency = len(df)
+            df = df[df["properties.lastUpdated"] >= recent_cutoff].copy()
+            after_recency = len(df)
+            # Create a mask for stale data
+            stale_mask = (df["properties.lastUpdated"] < recent_cutoff) | df["properties.lastUpdated"].isna()
+
+            print(f"Recency filtering: {before_recency} -> {after_recency} stations with recent data")
             
+            if df.empty:
+                print("Warning: No stations have recent data within the last 20 minutes")
+                return pd.DataFrame()
             print(f"Data status: {len(recent_stations)} recent, {len(stale_stations)} stale stations")
 
+        # Continue with original processing for remaining stations
         # Continue with original processing for all stations
         df = df.explode("properties.sensors")
 
@@ -260,6 +318,8 @@ def fetch_cotrip(api_key: str) -> pd.DataFrame:
                         "properties.lastUpdated",
                         "properties.nativeId",
                         "properties.direction",
+                        "station_code",  # Include station_code in the pivot
+                        "station_code",
                     ],
                     columns="sensor_type",
                     values="currentReading",
@@ -293,7 +353,7 @@ def fetch_cotrip(api_key: str) -> pd.DataFrame:
                 print(f"Set sensor readings to NaN for {stale_count} stations with stale data")
 
         # Ensure string columns are properly typed
-        string_cols = ["properties.name", "geometry.type", "properties.nativeId", "properties.direction"]
+        string_cols = ["properties.name", "geometry.type", "properties.nativeId", "properties.direction", "station_code"]
         for col in string_cols:
             if col in pivot.columns:
                 pivot[col] = pivot[col].astype(str)
@@ -305,13 +365,19 @@ def fetch_cotrip(api_key: str) -> pd.DataFrame:
                 pivot[col] = pd.to_numeric(pivot[col], errors='coerce')
 
         # Final summary
-        all_stations = pivot['properties.name'].unique()
+        final_stations = pivot['station_code'].unique()
+        print(f"Final CoTrip result: {len(pivot)} records from {len(final_stations)} stations")
+        print(f"Stations with recent data: {sorted(final_stations)}")
+        all_stations = pivot['station_code'].unique()
         recent_in_final = [s for s in all_stations if s in recent_stations]
         stale_in_final = [s for s in all_stations if s in stale_stations]
-        
+
+        missing_stations = SELECTED_STATIONS - set(final_stations)
+        if missing_stations:
+            print(f"Stations with no recent data: {sorted(missing_stations)}")
         print(f"Final CoTrip result: {len(pivot)} records from {len(all_stations)} stations")
-        print(f"Stations with recent data: {len(recent_in_final)}")
-        print(f"Stations with stale data (NaN sensors): {len(stale_in_final)}")
+        print(f"Stations with recent data: {len(recent_in_final)} - {sorted(recent_in_final)}")
+        print(f"Stations with stale data (NaN sensors): {len(stale_in_final)} - {sorted(stale_in_final)}")
 
         return pivot
 
@@ -319,12 +385,13 @@ def fetch_cotrip(api_key: str) -> pd.DataFrame:
         print(f"Error fetching CoTrip data: {e}")
         return pd.DataFrame()
 
+
 def pair_and_merge(rwis_pts: pd.DataFrame, cotrip: pd.DataFrame) -> pd.DataFrame:
     """Spatial join: pair filtered CoTrip stations with nearest RWIS stations."""
     if rwis_pts.empty:
         print("Warning: Empty RWIS DataFrame")
         return pd.DataFrame()
-    
+
     if cotrip.empty:
         print("Warning: No CoTrip data (all stations filtered out)")
         return pd.DataFrame()
@@ -364,7 +431,7 @@ def pair_and_merge(rwis_pts: pd.DataFrame, cotrip: pd.DataFrame) -> pd.DataFrame
     # Create RWIS matches
     rwis_match = pd.DataFrame(index=cotrip_clean.index, columns=rwis_clean.columns)
     valid_matches = dist != np.inf
-    
+
     if valid_matches.any():
         rwis_match.loc[valid_matches] = rwis_clean.iloc[idx[valid_matches]].values
         print(f"Successfully paired {valid_matches.sum()} of {len(cotrip_clean)} stations with RWIS data")
@@ -431,7 +498,7 @@ def build_snapshot(api_key: str) -> xr.Dataset:
 
     # Ensure we have a valid station ID column
     station_id_col = None
-    for col in ["station_code", "rwis_station_id", "station_id", "rwis_stid", "properties.name"]:
+    for col in ["station_code", "rwis_station_id", "station_id", "rwis_stid"]:
         if col in merged_df.columns:
             station_id_col = col
             break
@@ -442,21 +509,14 @@ def build_snapshot(api_key: str) -> xr.Dataset:
         station_id_col = "station_index"
         merged_df[station_id_col] = merged_df[station_id_col].astype(str)
 
-    # Ensure station IDs are strings and handle NaN values
+    # Ensure station IDs are strings
     merged_df[station_id_col] = merged_df[station_id_col].astype(str)
-    
-    # Replace 'nan' string with a valid station ID
-    nan_mask = merged_df[station_id_col] == 'nan'
-    if nan_mask.any():
-        print(f"Found {nan_mask.sum()} stations with 'nan' IDs, replacing with sequential IDs")
-        nan_indices = merged_df[nan_mask].index
-        merged_df.loc[nan_mask, station_id_col] = [f"UNKNOWN_{i:03d}" for i in range(len(nan_indices))]
-    
+
     # Fix timezone handling for valid_time - ensure everything is UTC
     if "valid_time" in merged_df.columns:
         print(f"DEBUG: valid_time dtype: {merged_df['valid_time'].dtype}")
         print(f"DEBUG: valid_time tz: {getattr(merged_df['valid_time'].dt, 'tz', 'No tz attribute')}")
-        
+
         # Convert to UTC timezone-aware first, then to naive
         if merged_df["valid_time"].dt.tz is None:
             # Timezone-naive - assume UTC and localize
@@ -466,11 +526,11 @@ def build_snapshot(api_key: str) -> xr.Dataset:
             # Already timezone-aware - convert to UTC if not already
             print(f"Converting timezone-aware timestamps from {merged_df['valid_time'].dt.tz} to UTC")
             merged_df["valid_time"] = merged_df["valid_time"].dt.tz_convert('UTC')
-        
+
         # Now convert to timezone-naive UTC for NetCDF compatibility
         merged_df["valid_time"] = merged_df["valid_time"].dt.tz_convert(None)
         print(f"Final valid_time dtype: {merged_df['valid_time'].dtype}")
-    
+
     # Also handle properties.lastUpdated if it exists
     if "properties.lastUpdated" in merged_df.columns:
         print(f"DEBUG: properties.lastUpdated dtype: {merged_df['properties.lastUpdated'].dtype}")
@@ -480,56 +540,15 @@ def build_snapshot(api_key: str) -> xr.Dataset:
         else:
             # Convert to UTC then to naive
             merged_df["properties.lastUpdated"] = merged_df["properties.lastUpdated"].dt.tz_convert('UTC').dt.tz_convert(None)
-    
+
     print(f"Using station ID column: {station_id_col}")
     print(f"Station IDs: {sorted(merged_df[station_id_col].unique())}")
 
-    # CRITICAL FIX: Handle duplicate MultiIndex entries before setting index
-    print("Checking for duplicate entries before creating MultiIndex...")
-    
-    # Create a temporary MultiIndex to check for duplicates
-    temp_index = pd.MultiIndex.from_arrays([
-        merged_df["valid_time"], 
-        merged_df[station_id_col]
-    ], names=["valid_time", station_id_col])
-    
-    # Check for duplicates
-    if temp_index.duplicated().any():
-        duplicate_count = temp_index.duplicated().sum()
-        print(f"Found {duplicate_count} duplicate MultiIndex entries, aggregating...")
-        
-        # Show some examples of duplicates
-        duplicated_mask = temp_index.duplicated(keep=False)
-        duplicate_examples = merged_df[duplicated_mask][["valid_time", station_id_col]].drop_duplicates().head(5)
-        print("Examples of duplicate (time, station) pairs:")
-        print(duplicate_examples)
-        
-        # Set index first, then aggregate duplicates
-        merged_df = merged_df.set_index(["valid_time", station_id_col])
-        
-        # Aggregate duplicates - use mean for numeric columns, first for others
-        def smart_agg(series):
-            if series.dtype in ['float64', 'float32', 'int64', 'int32']:
-                # For numeric data, use mean (ignoring NaN)
-                return series.mean()
-            else:
-                # For non-numeric data, use first non-null value
-                non_null = series.dropna()
-                return non_null.iloc[0] if len(non_null) > 0 else series.iloc[0]
-        
-        print("Aggregating duplicate entries...")
-        merged_df = merged_df.groupby(level=[0, 1]).agg(smart_agg)
-        
-        print(f"After aggregation: {len(merged_df)} unique (time, station) combinations")
-    else:
-        print("No duplicate MultiIndex entries found")
-        # Set time + station ID as index for dimensions
-        merged_df = merged_df.set_index(["valid_time", station_id_col])
-    
+    # Set time + station ID as index for dimensions
+    merged_df = merged_df.set_index(["valid_time", station_id_col])
     merged_df = merged_df.sort_index()
-    
+
     # Convert to xarray Dataset
-    print("Converting to xarray Dataset...")
     ds = xr.Dataset.from_dataframe(merged_df)
 
     # Promote useful metadata as coordinates if they exist
@@ -545,9 +564,6 @@ def build_snapshot(api_key: str) -> xr.Dataset:
             # Use the first matching coordinate column
             ds = ds.set_coords(coord_cols[0])
 
-    print(f"Successfully created xarray Dataset with {len(ds.dims)} dimensions")
-    print(f"Dataset dimensions: {dict(ds.dims)}")
-    
     return ds
 
 
@@ -556,107 +572,45 @@ def append_daily(ds: xr.Dataset) -> None:
     if "valid_time" not in ds.dims and "valid_time" not in ds.coords:
         raise ValueError("Dataset has no 'time' dimension or coordinate.")
 
-    # Clean up problematic datetime fields BEFORE encoding
-    print("Cleaning up datetime fields...")
-    
-    # Handle properties.lastUpdated - remove if it has invalid values
-    if "properties.lastUpdated" in ds.data_vars:
-        # Check for invalid timestamp values
-        last_updated_values = ds["properties.lastUpdated"].values
-        if np.any(last_updated_values < 0) or np.any(np.isnan(last_updated_values.astype(float))):
-            print("Found invalid timestamps in properties.lastUpdated, removing this variable")
-            ds = ds.drop_vars("properties.lastUpdated")
-        else:
-            # Convert to string to avoid datetime encoding issues
-            print("Converting properties.lastUpdated to string representation")
-            ds["properties.lastUpdated"] = ds["properties.lastUpdated"].astype(str)
-
-    # Ensure 'valid_time' is properly handled
+    # Ensure time is datetime, not string
+    # Ensure 'valid_time' is a coordinate
     if "valid_time" in ds.coords:
-        # Convert to numpy datetime64 without timezone
+    # Convert to numpy datetime64 without timezone
         times = pd.to_datetime(ds["valid_time"].values)
-        if hasattr(times, 'tz') and times.tz is not None:
-            times = times.tz_convert(None)
-        ds = ds.assign_coords(valid_time=times)
-    elif "valid_time" in ds.dims:
-        # If it's a dimension only, ensure it's timezone-naive
-        if hasattr(ds["valid_time"].values, 'dt'):
-            ds["valid_time"] = ds["valid_time"].dt.tz_convert(None)
 
-    # Also assign to 'time' coordinate for consistency
+        if times.tz is not None:
+            times = times.tz_convert(None)
+        else:
+            times = times.tz_localize(None)
+
+        ds = ds.assign_coords(valid_time=times)
+
+
+    elif "valid_time" in ds.dims:
+    # If it's a dimension only
+        ds["valid_time"] = ds["valid_time"].dt.tz_convert(None)
+        ds["valid_time"] = ds["valid_time"].dt.tz_localize(None)
+
+# Also assign to 'time' coordinate
     ds = ds.assign_coords(time=ds["valid_time"])
 
+
     fname = f"rwis_rtma_{pd.Timestamp.utcnow():%Y%m%d}.nc"
-
-    # Prepare encoding dictionary for all datetime-related variables
-    encoding = {}
-    
-    # Handle time coordinates with explicit encoding
-    time_vars = ['time', 'valid_time']
-    for time_var in time_vars:
-        if time_var in ds.coords or time_var in ds.data_vars:
-            encoding[time_var] = {
-                'units': 'seconds since 1970-01-01T00:00:00',
-                'dtype': 'float64',  # Use float64 for time to avoid casting issues
-                'calendar': 'proleptic_gregorian'
-            }
-
-    # Handle string variables
-    for var in ds.data_vars:
-        if ds[var].dtype == 'object':
-            if ds[var].size > 0:
-                sample_val = ds[var].values.flat[0] if ds[var].values.size > 0 else ""
-                if isinstance(sample_val, str) or sample_val is None:
-                    encoding[var] = {'dtype': 'U64'}  # Unicode string
-                else:
-                    # Convert to string if it's not already
-                    ds[var] = ds[var].astype(str)
-                    encoding[var] = {'dtype': 'U64'}
-
-    # Handle coordinate variables
-    for coord in ds.coords:
-        if coord not in encoding and ds[coord].dtype == 'object':
-            if ds[coord].size > 0:
-                sample_val = ds[coord].values.flat[0] if ds[coord].values.size > 0 else ""
-                if isinstance(sample_val, str) or sample_val is None:
-                    encoding[coord] = {'dtype': 'U64'}
-                else:
-                    # Convert to string if it's not already
-                    ds = ds.assign_coords({coord: ds[coord].astype(str)})
-                    encoding[coord] = {'dtype': 'U64'}
 
     if os.path.exists(fname):
         try:
             with xr.open_dataset(fname) as existing:
-                # Ensure coordinate compatibility before combining
-                print("Aligning coordinates between existing and new datasets...")
-                
-                # Drop problematic variables from existing dataset if they exist
-                vars_to_drop = []
-                for var in existing.data_vars:
-                    if var not in ds.data_vars:
-                        print(f"Dropping variable {var} from existing dataset (not in new data)")
-                        vars_to_drop.append(var)
-                
-                if vars_to_drop:
-                    existing = existing.drop_vars(vars_to_drop)
-                
-                # Ensure both datasets have the same coordinate structure
-                # Make sure 'time' coordinate exists in both
-                if 'time' not in existing.coords and 'valid_time' in existing.coords:
-                    existing = existing.assign_coords(time=existing['valid_time'])
-                
                 # Combine datasets
                 combined = xr.concat([existing, ds], dim="valid_time")
 
-                # Sort by time to ensure chronological order
+                # CRITICAL FIX: Sort by time to ensure chronological order
                 combined = combined.sortby("valid_time")
 
-                # Remove duplicate timestamps if they exist
+                # Optional: Remove duplicate timestamps if they exist
                 _, unique_indices = np.unique(combined.valid_time.values, return_index=True)
                 if len(unique_indices) < len(combined.valid_time):
                     print(f"Removing {len(combined.valid_time) - len(unique_indices)} duplicate timestamps")
-                    combined = combined.isel(valid_time=unique_indices)
+                    combined = combined.isel(time=unique_indices)
 
                 ds = combined.sortby("valid_time")
                 print(f"Appended to existing file: {fname}")
@@ -668,34 +622,63 @@ def append_daily(ds: xr.Dataset) -> None:
     else:
         print(f"Creating new daily file: {fname}")
 
-    # Save with proper encoding
-    print(f"Saving dataset with encoding: {list(encoding.keys())}")
-    
+    # Improved encoding - handle different data types properly
+    encoding = {}
+
+    # Process data variables
+    for var in ds.data_vars:
+        if ds[var].dtype == 'object':
+            # Check if it's actually string data or datetime
+            if ds[var].size > 0:
+                sample_val = ds[var].values.flat[0]
+                if isinstance(sample_val, str):
+                    encoding[var] = {'dtype': 'U64'}  # Unicode string
+                elif isinstance(sample_val, pd.Timestamp) or hasattr(sample_val, 'strftime'):
+                    # Convert datetime to string for NetCDF storage
+                    ds[var] = ds[var].astype(str)
+                    encoding[var] = {'dtype': 'U32'}  # Datetime as string
+                elif pd.isna(sample_val):
+                    # Handle NaN values - convert to string
+                    ds[var] = ds[var].astype(str)
+                    encoding[var] = {'dtype': 'U32'}
+
+    # Process coordinate variables
+    for coord in ds.coords:
+        if ds[coord].dtype == 'object':
+            if ds[coord].size > 0:
+                sample_val = ds[coord].values.flat[0]
+                if isinstance(sample_val, str):
+                    encoding[coord] = {'dtype': 'U64'}
+                elif isinstance(sample_val, pd.Timestamp) or hasattr(sample_val, 'strftime'):
+                    # Convert datetime to string for NetCDF storage
+                    ds = ds.assign_coords({coord: ds[coord].astype(str)})
+                    encoding[coord] = {'dtype': 'U32'}
+                elif pd.isna(sample_val):
+                    # Handle NaN values - convert to string
+                    ds = ds.assign_coords({coord: ds[coord].astype(str)})
+                    encoding[coord] = {'dtype': 'U32'}
+
+    # Use netCDF4 backend for compression support, fallback to scipy without compression
     try:
-        # Always use scipy backend to avoid netCDF4 dependency issues
-        ds.to_netcdf(fname, mode="w", encoding=encoding, engine='scipy')
-        print(f"Successfully saved to: {fname}")
-    except Exception as e:
-        print(f"Error saving with scipy backend: {e}")
-        
-        # Last resort: try without any encoding
-        try:
-            print("Attempting to save without custom encoding...")
-            # Drop any remaining problematic variables
-            safe_ds = ds.copy()
-            for var in list(safe_ds.data_vars):
-                if safe_ds[var].dtype == 'object':
-                    try:
-                        safe_ds[var] = safe_ds[var].astype(str)
-                    except:
-                        print(f"Dropping problematic variable: {var}")
-                        safe_ds = safe_ds.drop_vars(var)
-            
-            safe_ds.to_netcdf(fname, mode="w", engine='scipy')
-            print(f"Saved simplified dataset to: {fname}")
-        except Exception as final_e:
-            print(f"Final save attempt failed: {final_e}")
-            raise
+        # Try netCDF4 backend with compression
+        for var in ds.data_vars:
+            if var not in encoding:
+                encoding[var] = {}
+            encoding[var].update({'zlib': True, 'complevel': 4})
+
+        ds.to_netcdf(fname, mode="w", encoding=encoding, engine='netcdf4')
+        print(f"Saved with netCDF4 backend and compression")
+    except (ImportError, ValueError) as e:
+        # Fallback to scipy backend without compression
+        print(f"NetCDF4 not available, using scipy backend: {e}")
+        # Remove compression from encoding
+        for var in encoding:
+            if isinstance(encoding[var], dict):
+                encoding[var].pop('zlib', None)
+                encoding[var].pop('complevel', None)
+
+        ds.to_netcdf(fname, mode="w", encoding=encoding)
+    print(f"Saved to: {fname}")
 
 
 def main() -> None:
@@ -714,15 +697,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
-
-
-
-
