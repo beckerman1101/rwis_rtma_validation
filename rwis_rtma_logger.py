@@ -431,7 +431,7 @@ def build_snapshot(api_key: str) -> xr.Dataset:
 
     # Ensure we have a valid station ID column
     station_id_col = None
-    for col in ["station_code", "rwis_station_id", "station_id", "rwis_stid"]:
+    for col in ["station_code", "rwis_station_id", "station_id", "rwis_stid", "properties.name"]:
         if col in merged_df.columns:
             station_id_col = col
             break
@@ -442,8 +442,15 @@ def build_snapshot(api_key: str) -> xr.Dataset:
         station_id_col = "station_index"
         merged_df[station_id_col] = merged_df[station_id_col].astype(str)
 
-    # Ensure station IDs are strings
+    # Ensure station IDs are strings and handle NaN values
     merged_df[station_id_col] = merged_df[station_id_col].astype(str)
+    
+    # Replace 'nan' string with a valid station ID
+    nan_mask = merged_df[station_id_col] == 'nan'
+    if nan_mask.any():
+        print(f"Found {nan_mask.sum()} stations with 'nan' IDs, replacing with sequential IDs")
+        nan_indices = merged_df[nan_mask].index
+        merged_df.loc[nan_mask, station_id_col] = [f"UNKNOWN_{i:03d}" for i in range(len(nan_indices))]
     
     # Fix timezone handling for valid_time - ensure everything is UTC
     if "valid_time" in merged_df.columns:
@@ -477,11 +484,52 @@ def build_snapshot(api_key: str) -> xr.Dataset:
     print(f"Using station ID column: {station_id_col}")
     print(f"Station IDs: {sorted(merged_df[station_id_col].unique())}")
 
-    # Set time + station ID as index for dimensions
-    merged_df = merged_df.set_index(["valid_time", station_id_col])
+    # CRITICAL FIX: Handle duplicate MultiIndex entries before setting index
+    print("Checking for duplicate entries before creating MultiIndex...")
+    
+    # Create a temporary MultiIndex to check for duplicates
+    temp_index = pd.MultiIndex.from_arrays([
+        merged_df["valid_time"], 
+        merged_df[station_id_col]
+    ], names=["valid_time", station_id_col])
+    
+    # Check for duplicates
+    if temp_index.duplicated().any():
+        duplicate_count = temp_index.duplicated().sum()
+        print(f"Found {duplicate_count} duplicate MultiIndex entries, aggregating...")
+        
+        # Show some examples of duplicates
+        duplicated_mask = temp_index.duplicated(keep=False)
+        duplicate_examples = merged_df[duplicated_mask][["valid_time", station_id_col]].drop_duplicates().head(5)
+        print("Examples of duplicate (time, station) pairs:")
+        print(duplicate_examples)
+        
+        # Set index first, then aggregate duplicates
+        merged_df = merged_df.set_index(["valid_time", station_id_col])
+        
+        # Aggregate duplicates - use mean for numeric columns, first for others
+        def smart_agg(series):
+            if series.dtype in ['float64', 'float32', 'int64', 'int32']:
+                # For numeric data, use mean (ignoring NaN)
+                return series.mean()
+            else:
+                # For non-numeric data, use first non-null value
+                non_null = series.dropna()
+                return non_null.iloc[0] if len(non_null) > 0 else series.iloc[0]
+        
+        print("Aggregating duplicate entries...")
+        merged_df = merged_df.groupby(level=[0, 1]).agg(smart_agg)
+        
+        print(f"After aggregation: {len(merged_df)} unique (time, station) combinations")
+    else:
+        print("No duplicate MultiIndex entries found")
+        # Set time + station ID as index for dimensions
+        merged_df = merged_df.set_index(["valid_time", station_id_col])
+    
     merged_df = merged_df.sort_index()
     
     # Convert to xarray Dataset
+    print("Converting to xarray Dataset...")
     ds = xr.Dataset.from_dataframe(merged_df)
 
     # Promote useful metadata as coordinates if they exist
@@ -497,6 +545,9 @@ def build_snapshot(api_key: str) -> xr.Dataset:
             # Use the first matching coordinate column
             ds = ds.set_coords(coord_cols[0])
 
+    print(f"Successfully created xarray Dataset with {len(ds.dims)} dimensions")
+    print(f"Dataset dimensions: {dict(ds.dims)}")
+    
     return ds
 
 
@@ -630,6 +681,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
