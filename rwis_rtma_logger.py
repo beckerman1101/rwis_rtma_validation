@@ -242,8 +242,8 @@ def fetch_cotrip(api_key: str) -> pd.DataFrame:
             
             # Create a mask for stale data
             stale_mask = (df["properties.lastUpdated"] < recent_cutoff) | df["properties.lastUpdated"].isna()
-                        print(f"Station {station_name}: Stale data ({minutes_old:.1f} min old) - will use NaNs")
-                        stale_stations.append(station_name)
+            print(f"Station {station_name}: Stale data ({minutes_old:.1f} min old) - will use NaNs")
+            stale_stations.append(station_name)
 
             print(f"Data status: {len(recent_stations)} recent, {len(stale_stations)} stale stations")
 
@@ -659,3 +659,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
