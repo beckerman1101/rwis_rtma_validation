@@ -185,74 +185,21 @@ def fetch_cotrip(api_key: str) -> pd.DataFrame:
             print("Warning: Empty features list from CoTrip")
             return pd.DataFrame()
 
-        # Check if sensors data exists
         if "properties.sensors" not in df.columns:
             print("Warning: No sensor data in CoTrip response")
             return pd.DataFrame()
 
-        # Extract station codes for all stations (no filtering by SELECTED_STATIONS)
-        if "properties.name" in df.columns:
-            df['station_code'] = df["properties.name"].apply(extract_station_code)
-            # Remove stations without valid station codes
-            df = df.dropna(subset=['station_code']).copy()
-            
-            if df.empty:
-                print("Warning: No stations with valid station codes found")
-                return pd.DataFrame()
-                
-            print(f"Processing {len(df)} total stations from CoTrip")
-        else:
-            print("Warning: No 'properties.name' column for station identification")
-            return pd.DataFrame()
-        # Process all stations - no filtering needed
         print(f"Processing {len(df)} total stations from CoTrip")
 
-        # Apply recency check but don't filter out - mark stale data instead
+        # Timestamp check
         current_time = datetime.now(timezone.utc)
         recent_cutoff = current_time - timedelta(minutes=RECENT_MIN)
 
-        recent_stations = []
-        stale_stations = []
-
         if "properties.lastUpdated" in df.columns:
-            # Ensure timestamps are UTC timezone-aware
             df["properties.lastUpdated"] = pd.to_datetime(df["properties.lastUpdated"], utc=True, errors="coerce")
 
-            # Categorize stations by data recency
-            for _, row in df.iterrows():
-                station_code = row['station_code']
-                station_name = row.get('properties.name', f'Station_{row.name}')
-                last_updated = row['properties.lastUpdated']
-
-                if pd.isna(last_updated):
-                    print(f"Station {station_code}: No timestamp - treating as stale")
-                    stale_stations.append(station_code)
-                    print(f"Station {station_name}: No timestamp - treating as stale")
-                    stale_stations.append(station_name)
-                else:
-                    minutes_old = (current_time - last_updated).total_seconds() / 60
-                    if minutes_old <= RECENT_MIN:
-                        print(f"Station {station_code}: Recent data ({minutes_old:.1f} min old)")
-                        recent_stations.append(station_code)
-                        print(f"Station {station_name}: Recent data ({minutes_old:.1f} min old)")
-                        recent_stations.append(station_name)
-                    else:
-                        print(f"Station {station_code}: Stale data ({minutes_old:.1f} min old) - will use NaNs")
-                        stale_stations.append(station_code)
-            
-            # Create a mask for stale data
-            stale_mask = (df["properties.lastUpdated"] < recent_cutoff) | df["properties.lastUpdated"].isna()
-            print(f"Station {station_name}: Stale data ({minutes_old:.1f} min old) - will use NaNs")
-            stale_stations.append(station_name)
-
-            print(f"Data status: {len(recent_stations)} recent, {len(stale_stations)} stale stations")
-
-        # Continue with original processing for all stations
-        df = df.explode("properties.sensors")
-
-        # Handle case where sensors might be None
-        df = df.dropna(subset=["properties.sensors"])
-
+        # Explode and clean sensor data
+        df = df.explode("properties.sensors").dropna(subset=["properties.sensors"])
         if df.empty:
             print("Warning: No valid sensor data after explosion")
             return pd.DataFrame()
@@ -261,92 +208,65 @@ def fetch_cotrip(api_key: str) -> pd.DataFrame:
         meta = df.drop(columns=["properties.sensors"]).reset_index(drop=True)
         merged = pd.concat([meta, sensors], axis=1)
 
-        # Safe coordinate extraction
+        # Coordinates
         if "geometry.coordinates" in merged.columns:
             coords = merged["geometry.coordinates"].apply(
                 lambda x: pd.Series([float(x[0]), float(x[1])]) if isinstance(x, list) and len(x) >= 2 else pd.Series([np.nan, np.nan])
             )
             merged[["lon", "lat"]] = coords[[0, 1]]
         else:
-            print("Warning: No geometry coordinates in CoTrip data")
             merged[["lon", "lat"]] = [np.nan, np.nan]
 
-        # Safe pivot with error handling
-        try:
-            pivot = (
-                merged.pivot_table(
-                    index=[
-                        "properties.name",
-                        "lon",
-                        "lat",
-                        "geometry.type",
-                        "geometry.srid",
-                        "properties.lastUpdated",
-                        "properties.nativeId",
-                        "properties.direction",
-                        "station_code",
-                    ],
-                    columns="sensor_type",
-                    values="currentReading",
-                    aggfunc="first",
-                )
-                .reset_index()
-                .copy()
+        # Pivot sensors
+        pivot = (
+            merged.pivot_table(
+                index=[
+                    "properties.name",
+                    "lon",
+                    "lat",
+                    "geometry.type",
+                    "geometry.srid",
+                    "properties.lastUpdated",
+                    "properties.nativeId",
+                    "properties.direction",
+                ],
+                columns="sensor_type",
+                values="currentReading",
+                aggfunc="first",
             )
-        except Exception as e:
-            print(f"Error during pivot: {e}")
-            return pd.DataFrame()
+            .reset_index()
+            .copy()
+        )
 
-        # NOW: Replace sensor readings with NaN for stale stations
+        # Mark stale data
         if "properties.lastUpdated" in pivot.columns:
             stale_mask = (pivot["properties.lastUpdated"] < recent_cutoff) | pivot["properties.lastUpdated"].isna()
 
-            # List of sensor columns to nullify for stale data
             sensor_columns = [
-                "visibility", "min temperature", "dew point", "gust wind speed", 
-                "max temperature", "temperature", "average wind speed", 
+                "visibility", "min temperature", "dew point", "gust wind speed",
+                "max temperature", "temperature", "average wind speed",
                 "road surface friction index", "humidity"
             ]
-
-            # Replace sensor readings with NaN for stale stations
             for col in sensor_columns:
                 if col in pivot.columns:
                     pivot.loc[stale_mask, col] = np.nan
+            print(f"Set sensor readings to NaN for {stale_mask.sum()} stale stations")
 
-            stale_count = stale_mask.sum()
-            if stale_count > 0:
-                print(f"Set sensor readings to NaN for {stale_count} stations with stale data")
-
-        # Ensure string columns are properly typed
-        string_cols = ["properties.name", "geometry.type", "properties.nativeId", "properties.direction", "station_code"]
-        string_cols = ["properties.name", "geometry.type", "properties.nativeId", "properties.direction"]
-        for col in string_cols:
+        # Cast columns
+        for col in ["properties.name", "geometry.type", "properties.nativeId", "properties.direction"]:
             if col in pivot.columns:
                 pivot[col] = pivot[col].astype(str)
-
-        # Ensure numeric columns are float
-        numeric_cols = ["lon", "lat", "geometry.srid","visibility","min temperature","dew point","gust wind speed","max temperature","temperature","average wind speed","road surface friction index","humidity"]
-        for col in numeric_cols:
+        for col in ["lon", "lat", "geometry.srid"] + sensor_columns:
             if col in pivot.columns:
                 pivot[col] = pd.to_numeric(pivot[col], errors='coerce')
 
-        # Final summary
-        all_stations = pivot['station_code'].unique()
-        all_stations = pivot['properties.name'].unique()
-        recent_in_final = [s for s in all_stations if s in recent_stations]
-        stale_in_final = [s for s in all_stations if s in stale_stations]
-
-        print(f"Final CoTrip result: {len(pivot)} records from {len(all_stations)} stations")
-        print(f"Stations with recent data: {len(recent_in_final)} - {sorted(recent_in_final)}")
-        print(f"Stations with stale data (NaN sensors): {len(stale_in_final)} - {sorted(stale_in_final)}")
-        print(f"Stations with recent data: {len(recent_in_final)}")
-        print(f"Stations with stale data (NaN sensors): {len(stale_in_final)}")
-
+        print(f"Final CoTrip result: {len(pivot)} station records")
         return pivot
 
     except Exception as e:
         print(f"Error fetching CoTrip data: {e}")
         return pd.DataFrame()
+
 
 def pair_and_merge(rwis_pts: pd.DataFrame, cotrip: pd.DataFrame) -> pd.DataFrame:
     """Spatial join: pair filtered CoTrip stations with nearest RWIS stations."""
@@ -659,4 +579,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
