@@ -459,116 +459,88 @@ def build_snapshot(api_key: str) -> xr.Dataset:
 
 def append_daily(ds: xr.Dataset) -> None:
     """Append snapshot to daily NetCDF; create new file if absent."""
+    import numpy as np
+    import pandas as pd
+    import os
+    import xarray as xr
+
     if "valid_time" not in ds.dims and "valid_time" not in ds.coords:
-        raise ValueError("Dataset has no 'time' dimension or coordinate.")
+        raise ValueError("Dataset has no 'valid_time' dimension or coordinate.")
 
-    # Ensure time is datetime, not string
-    # Ensure 'valid_time' is a coordinate
+    # Normalize valid_time coord to naive datetime64[ns]
     if "valid_time" in ds.coords:
-    # Convert to numpy datetime64 without timezone
-        times = pd.to_datetime(ds["valid_time"].values)
-
-        if times.tz is not None:
-            times = times.tz_convert(None)
+        valid_times = pd.to_datetime(ds["valid_time"].values)
+        if valid_times.tz is not None:
+            valid_times = valid_times.tz_convert(None)
         else:
-            times = times.tz_localize(None)
-
-        ds = ds.assign_coords(valid_time=times)
-
-
+            valid_times = valid_times.tz_localize(None)
+        ds = ds.assign_coords(valid_time=valid_times)
     elif "valid_time" in ds.dims:
-    # If it's a dimension only
+        # If it's a dimension only
         ds["valid_time"] = ds["valid_time"].dt.tz_convert(None)
         ds["valid_time"] = ds["valid_time"].dt.tz_localize(None)
 
-# Also assign to 'time' coordinate
+    # Also assign 'time' coord equal to 'valid_time' for compatibility
     ds = ds.assign_coords(time=ds["valid_time"])
-
 
     fname = f"rwis_rtma_{pd.Timestamp.utcnow():%Y%m%d}.nc"
 
+    # If file exists, read and concatenate, else create new
     if os.path.exists(fname):
         try:
             with xr.open_dataset(fname) as existing:
-                # Combine datasets
                 combined = xr.concat([existing, ds], dim="valid_time")
-
-                # CRITICAL FIX: Sort by time to ensure chronological order
                 combined = combined.sortby("valid_time")
 
-                # Optional: Remove duplicate timestamps if they exist
-                _, unique_indices = np.unique(combined.valid_time.values, return_index=True)
-                if len(unique_indices) < len(combined.valid_time):
-                    print(f"Removing {len(combined.valid_time) - len(unique_indices)} duplicate timestamps")
-                    combined = combined.isel(time=unique_indices)
+                # Remove duplicates if any
+                _, unique_idx = np.unique(combined.valid_time.values, return_index=True)
+                if len(unique_idx) < len(combined.valid_time):
+                    combined = combined.isel(valid_time=unique_idx)
 
                 ds = combined.sortby("valid_time")
                 print(f"Appended to existing file: {fname}")
                 print(f"Total time range: {ds.time.min().values} to {ds.time.max().values}")
                 print(f"Total snapshots: {len(ds.time)}")
-
         except Exception as e:
             print(f"Error reading existing file, creating new one: {e}")
     else:
         print(f"Creating new daily file: {fname}")
 
-    # Improved encoding - handle different data types properly
+    # Setup encoding explicitly to avoid int64->int32 casting error in scipy backend
     encoding = {}
 
-    # Process data variables
+    # Encode time coords and variables to int32 seconds since epoch
+    time_vars = []
+    if "valid_time" in ds.coords:
+        time_vars.append("valid_time")
+    if "time" in ds.coords and "time" != "valid_time":
+        time_vars.append("time")
+
+    for tvar in time_vars:
+        encoding[tvar] = {
+            "units": "seconds since 1970-01-01 00:00:00",
+            "dtype": "int32",
+            "calendar": "standard"
+        }
+
+    # Also encode any datetime64 variables in data_vars similarly
     for var in ds.data_vars:
-        if ds[var].dtype == 'object':
-            # Check if it's actually string data or datetime
-            if ds[var].size > 0:
-                sample_val = ds[var].values.flat[0]
-                if isinstance(sample_val, str):
-                    encoding[var] = {'dtype': 'U64'}  # Unicode string
-                elif isinstance(sample_val, pd.Timestamp) or hasattr(sample_val, 'strftime'):
-                    # Convert datetime to string for NetCDF storage
-                    ds[var] = ds[var].astype(str)
-                    encoding[var] = {'dtype': 'U32'}  # Datetime as string
-                elif pd.isna(sample_val):
-                    # Handle NaN values - convert to string
-                    ds[var] = ds[var].astype(str)
-                    encoding[var] = {'dtype': 'U32'}
+        if np.issubdtype(ds[var].dtype, np.datetime64):
+            encoding[var] = {
+                "units": "seconds since 1970-01-01 00:00:00",
+                "dtype": "int32",
+                "calendar": "standard"
+            }
 
-    # Process coordinate variables
-    for coord in ds.coords:
-        if ds[coord].dtype == 'object':
-            if ds[coord].size > 0:
-                sample_val = ds[coord].values.flat[0]
-                if isinstance(sample_val, str):
-                    encoding[coord] = {'dtype': 'U64'}
-                elif isinstance(sample_val, pd.Timestamp) or hasattr(sample_val, 'strftime'):
-                    # Convert datetime to string for NetCDF storage
-                    ds = ds.assign_coords({coord: ds[coord].astype(str)})
-                    encoding[coord] = {'dtype': 'U32'}
-                elif pd.isna(sample_val):
-                    # Handle NaN values - convert to string
-                    ds = ds.assign_coords({coord: ds[coord].astype(str)})
-                    encoding[coord] = {'dtype': 'U32'}
+    # Encode strings as unicode with fixed length (optional)
+    for var in ds.data_vars:
+        if ds[var].dtype == "object":
+            encoding[var] = {"dtype": "U64"}
 
-    # Use netCDF4 backend for compression support, fallback to scipy without compression
-    try:
-        # Try netCDF4 backend with compression
-        for var in ds.data_vars:
-            if var not in encoding:
-                encoding[var] = {}
-            encoding[var].update({'zlib': True, 'complevel': 4})
+    # Save with scipy backend, no compression (netcdf4 is not available)
+    ds.to_netcdf(fname, mode="w", encoding=encoding, engine="scipy")
+    print(f"Saved to: {fname} (scipy backend with int32 time encoding)")
 
-        ds.to_netcdf(fname, mode="w", encoding=encoding, engine='netcdf4')
-        print(f"Saved with netCDF4 backend and compression")
-    except (ImportError, ValueError) as e:
-        # Fallback to scipy backend without compression
-        print(f"NetCDF4 not available, using scipy backend: {e}")
-        # Remove compression from encoding
-        for var in encoding:
-            if isinstance(encoding[var], dict):
-                encoding[var].pop('zlib', None)
-                encoding[var].pop('complevel', None)
-
-        ds.to_netcdf(fname, mode="w", encoding=encoding)
-    print(f"Saved to: {fname}")
 
 
 def main() -> None:
@@ -587,6 +559,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
