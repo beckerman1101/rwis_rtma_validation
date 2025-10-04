@@ -17,6 +17,13 @@ import xarray as xr
 import requests
 from scipy.spatial import cKDTree
 import cfgrib
+from pathlib import Path
+from datetime import datetime
+
+# Define today's NetCDF filename (UTC-based)
+filename = Path(f"rwis_rtma_{datetime.utcnow():%Y%m%d}.nc")
+print(f"NetCDF file path: {filename.resolve()}")
+
 
 # ---------------------------------------------------------------------------
 # CONFIGURATION
@@ -457,59 +464,63 @@ def build_snapshot(api_key: str) -> xr.Dataset:
     return ds
 
 
-def append_daily(ds: xr.Dataset) -> None:
-    """Append snapshot to daily NetCDF; create new file if absent."""
+def append_to_netcdf(ds: xr.Dataset) -> None:
+    """Safely append snapshot to daily NetCDF, or create new file if absent."""
     import numpy as np
     import pandas as pd
     import os
     import xarray as xr
+    import tempfile
+    import shutil
 
+    # --- Step 1: Validate and normalize time coordinates ---
     if "valid_time" not in ds.dims and "valid_time" not in ds.coords:
         raise ValueError("Dataset has no 'valid_time' dimension or coordinate.")
 
-    # Normalize valid_time coord to naive datetime64[ns]
+    # Convert valid_time to timezone-naive datetime64[ns]
     if "valid_time" in ds.coords:
         valid_times = pd.to_datetime(ds["valid_time"].values)
-        if valid_times.tz is not None:
-            valid_times = valid_times.tz_convert(None)
-        else:
-            valid_times = valid_times.tz_localize(None)
+        valid_times = (
+            valid_times.tz_convert(None)
+            if getattr(valid_times, "tz", None) is not None
+            else valid_times.tz_localize(None)
+        )
         ds = ds.assign_coords(valid_time=valid_times)
     elif "valid_time" in ds.dims:
-        # If it's a dimension only
-        ds["valid_time"] = ds["valid_time"].dt.tz_convert(None)
         ds["valid_time"] = ds["valid_time"].dt.tz_localize(None)
 
-    # Also assign 'time' coord equal to 'valid_time' for compatibility
+    # Add a 'time' coordinate for convenience and compatibility
     ds = ds.assign_coords(time=ds["valid_time"])
 
     fname = f"rwis_rtma_{pd.Timestamp.utcnow():%Y%m%d}.nc"
+    tmp_path = os.path.join(tempfile.gettempdir(), f"tmp_{fname}")
 
-    # If file exists, read and concatenate, else create new
+    # --- Step 2: Merge with existing file if present ---
     if os.path.exists(fname):
         try:
             with xr.open_dataset(fname) as existing:
                 combined = xr.concat([existing, ds], dim="valid_time")
                 combined = combined.sortby("valid_time")
 
-                # Remove duplicates if any
+                # Remove duplicates (keep first occurrence)
                 _, unique_idx = np.unique(combined.valid_time.values, return_index=True)
                 if len(unique_idx) < len(combined.valid_time):
                     combined = combined.isel(valid_time=unique_idx)
 
                 ds = combined.sortby("valid_time")
+
                 print(f"Appended to existing file: {fname}")
-                print(f"Total time range: {ds.time.min().values} to {ds.time.max().values}")
-                print(f"Total snapshots: {len(ds.time)}")
+                print(f"Total range: {ds.time.min().values} → {ds.time.max().values}")
+                print(f"Snapshots: {len(ds.time)}")
         except Exception as e:
-            print(f"Error reading existing file, creating new one: {e}")
+            print(f"⚠️ Error reading {fname}, starting new file: {e}")
     else:
         print(f"Creating new daily file: {fname}")
 
-    # Setup encoding explicitly to avoid int64->int32 casting error in scipy backend
+    # --- Step 3: Encoding setup ---
     encoding = {}
 
-    # Encode time coords and variables to int32 seconds since epoch
+    # Encode time coordinates as int32 seconds since epoch
     time_vars = []
     if "valid_time" in ds.coords:
         time_vars.append("valid_time")
@@ -520,26 +531,37 @@ def append_daily(ds: xr.Dataset) -> None:
         encoding[tvar] = {
             "units": "seconds since 1970-01-01 00:00:00",
             "dtype": "int32",
-            "calendar": "standard"
+            "calendar": "standard",
         }
 
-    # Also encode any datetime64 variables in data_vars similarly
+    # Encode datetime64 variables in data_vars similarly
     for var in ds.data_vars:
         if np.issubdtype(ds[var].dtype, np.datetime64):
             encoding[var] = {
                 "units": "seconds since 1970-01-01 00:00:00",
                 "dtype": "int32",
-                "calendar": "standard"
+                "calendar": "standard",
             }
 
-    # Encode strings as unicode with fixed length (optional)
+    # Encode string/object vars as fixed-length unicode
     for var in ds.data_vars:
         if ds[var].dtype == "object":
             encoding[var] = {"dtype": "U64"}
 
-    # Save with scipy backend, no compression (netcdf4 is not available)
-    ds.to_netcdf(fname, mode="w", encoding=encoding, engine="scipy")
-    print(f"Saved to: {fname} (scipy backend with int32 time encoding)")
+    # --- Step 4: Write atomically (temp file → move) ---
+    try:
+        ds.to_netcdf(
+            tmp_path,
+            mode="w",
+            encoding=encoding,
+            engine="netcdf4" if "netcdf4" in xr.backends.list_engines() else "scipy",
+        )
+        shutil.move(tmp_path, fname)
+        print(f"✅ Saved safely to: {fname}")
+    except Exception as e:
+        print(f"❌ Failed to save {fname}: {e}")
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 
 
@@ -550,7 +572,7 @@ def main() -> None:
 
     try:
         ds = build_snapshot(api_key)
-        append_daily(ds)
+        append_to_netcdf(ds)
         print(f"[{datetime.utcnow():%Y-%m-%d %H:%M}] snapshot appended successfully.")
     except Exception as e:
         print(f"Error in main execution: {e}")
@@ -559,6 +581,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
