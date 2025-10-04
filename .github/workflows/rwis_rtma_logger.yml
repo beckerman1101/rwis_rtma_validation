@@ -47,20 +47,24 @@ jobs:
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@users.noreply.github.com"
+          git config diff.binary true
+          git config --global core.autocrlf false
+
           $filename = "rwis_rtma_$((Get-Date).ToUniversalTime().ToString('yyyyMMdd')).nc"
 
           if (Test-Path $filename) {
-            Write-Output "Found $filename. Preparing to commit..."
-            git add $filename
-            if (git diff --cached --quiet) {
-              Write-Output "No changes to commit in $filename"
-            } else {
-              git commit -m "Update NetCDF snapshot for $((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss')) UTC"
-              git push origin main
-            }
+            Write-Output "Found $filename. Forcing Git to register binary change..."
+            git add -f $filename
+
+            # Always create a commit, even if git thinks there's no diff
+            git commit -m "Append NetCDF snapshot for $((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss')) UTC" --allow-empty
+            git push origin main
           } else {
             Write-Output "No NetCDF file found to commit."
           }
+
+          Write-Output "Commit + push complete."
+
 
       - name: Verify file after push
         shell: bash
