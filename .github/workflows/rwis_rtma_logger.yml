@@ -3,10 +3,10 @@ name: RWIS + RTMA Snapshot Logger (Windows)
 on:
   schedule:
     - cron: '3,33 * * * *'  # Twice hourly at :03 and :33 UTC
-  workflow_dispatch:        # Manual trigger
+  workflow_dispatch:
 
 permissions:
-  contents: write  # Required to allow pushing changes
+  contents: write
 
 jobs:
   build:
@@ -17,13 +17,13 @@ jobs:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
-      - name: Checkout repository
+      - name: Checkout repository (with full history)
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          fetch-depth: 0  # Needed for pull/rebase
+          fetch-depth: 0  # Required for rebase/push to work correctly
 
-      - name: Set up Python
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -31,10 +31,15 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install numpy pandas xarray requests scipy cfgrib
+          pip install numpy pandas xarray requests scipy cfgrib netCDF4
 
       - name: Run RWIS/RTMA snapshot script
         run: python rwis_rtma_logger.py
+
+      - name: Debug file diff
+        run: |
+          git status
+          git diff --stat
 
       - name: Commit and push updated NetCDF
         shell: pwsh
@@ -42,24 +47,31 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Compute filename dynamically
           $filename = "rwis_rtma_$((Get-Date).ToUniversalTime().ToString('yyyyMMdd')).nc"
-
           if (Test-Path $filename) {
             git add $filename
 
-            # Only continue if there are changes
             if (git diff --cached --quiet) {
               Write-Output "No changes to commit in $filename"
               exit 0
             }
 
-            # Pull and rebase before pushing to avoid conflicts
             git pull origin main --rebase
+            git commit -m "Append NetCDF snapshot for $((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm')) UTC"
 
-            git commit -m "Update NetCDF snapshot for $((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm')) UTC"
-
-            git push origin HEAD:main
+            try {
+              git push origin HEAD:main
+              Write-Output "✅ Pushed updated NetCDF to origin/main"
+            } catch {
+              Write-Warning "⚠️ git push failed: $($_.Exception.Message)"
+            }
           } else {
-            Write-Output "No NetCDF file found to commit."
+            Write-Output "⚠️ No NetCDF file found to commit."
           }
+
+      - name: Upload NetCDF artifact (backup)
+        uses: actions/upload-artifact@v4
+        with:
+          name: rwis-rtma-netcdf
+          path: 'rwis_rtma_*.nc'
+          if-no-files-found: warn
