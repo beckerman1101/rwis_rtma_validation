@@ -1,9 +1,9 @@
 name: RWIS + RTMA Snapshot Logger (Windows)
 
-on:
-  schedule:
-    - cron: '3,33 * * * *'  # Twice hourly at :03 and :33 UTC
-  workflow_dispatch:
+#on:
+ # schedule:
+  #  - cron: '3,33 * * * *'  # Twice hourly at :03 and :33 UTC
+  #workflow_dispatch:
 
 permissions:
   contents: write
